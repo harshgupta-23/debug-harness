@@ -1,5 +1,7 @@
 # Deterministic Code-Graph Debugging & Mutation Harness
 
+[![Repository](https://img.shields.io/badge/GitHub-harshgupta--23%2Fdebug--harness-blue)](https://github.com/harshgupta-23/debug-harness)
+
 A developer engine and CLI that analyzes codebases, locks cross-boundary dependencies into atomic mutation plans, and verifies bug fixes using deterministic AST graphs and sandbox execution.
 
 ---
@@ -7,13 +9,13 @@ A developer engine and CLI that analyzes codebases, locks cross-boundary depende
 ## ⚡ Quickstart
 
 ```bash
-# 1. Install editable package
+# Direct install from GitHub:
+uv tool install git+https://github.com/harshgupta-23/debug-harness.git
+
+# Or install locally in development:
 uv pip install -e .
 
-# 2. Point to your project folder and fix a bug:
-harness fix --repo /path/to/project --issue "Fix NoneType error in calculate_total"
-
-# To directly apply verified changes to disk:
+# Point to your project folder and fix a bug:
 harness fix --repo /path/to/project --issue "Fix NoneType error in calculate_total" --apply
 ```
 

@@ -10,10 +10,10 @@ No local cloning needed. AGY can invoke the harness using `uvx` or a global `uv 
 
 ```bash
 # Global CLI installation
-uv tool install git+https://github.com/<your-username>/debug-harness.git
+uv tool install git+https://github.com/harshgupta-23/debug-harness.git
 
 # Or run ephemerally with uvx (zero pre-install required)
-uvx --from git+https://github.com/<your-username>/debug-harness.git harness --help
+uvx --from git+https://github.com/harshgupta-23/debug-harness.git harness --help
 ```
 
 ---
@@ -29,7 +29,7 @@ Add the harness to your Antigravity MCP configuration (`~/.gemini/antigravity/mc
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/<your-username>/debug-harness.git",
+        "git+https://github.com/harshgupta-23/debug-harness.git",
         "harness",
         "mcp"
       ],
