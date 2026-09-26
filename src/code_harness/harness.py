@@ -49,13 +49,12 @@ class Harness:
         self,
         repo_path: str | Path = ".",
         use_harness: bool = True,
-        model: Optional[str] = None,
+        model: str = "gemini-1.5-flash",
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.use_harness = use_harness
-        self.llm = LLMClient(model=model, api_key=api_key, base_url=base_url)
+        self.llm = LLMClient(model=model, api_key=api_key)
         self.indexer = RepositoryIndexer(self.repo_path)
         self.scorer = System1Scorer()
         self.blast_engine = BlastRadiusEngine()

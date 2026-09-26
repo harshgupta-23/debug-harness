@@ -1,153 +1,100 @@
-# Agent Integration & GitHub Installation Guide
+# Antigravity (AGY) Integration Guide
 
-Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)**, **Claude Code**, **Cursor**, **Aider**, or any custom agent workflow straight from GitHub.
+Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)** as a Model Context Protocol (MCP) server directly from GitHub.
 
 ---
 
-## 1. Direct Installation from GitHub
+## 1. Quick Install via GitHub
 
-No local cloning required. Install or execute directly using `uv` or `pip`:
+No local cloning needed. AGY can invoke the harness using `uvx` or a global `uv tool` install:
 
 ```bash
-# Option A: Run ephemerally via uvx (zero-install)
-uvx --from git+https://github.com/<your-username>/debug-harness.git harness --help
-
-# Option B: Global CLI installation via uv tool
+# Global CLI installation
 uv tool install git+https://github.com/<your-username>/debug-harness.git
 
-# Option C: Standard pip install into existing environment
-pip install git+https://github.com/<your-username>/debug-harness.git
+# Or run ephemerally with uvx (zero pre-install required)
+uvx --from git+https://github.com/<your-username>/debug-harness.git harness --help
 ```
 
 ---
 
-## 2. Agent Integration Options
+## 2. AGY MCP Configuration
 
-### A. Antigravity (AGY) Integration
-
-Add the harness as an MCP tool to your AGY configuration (e.g., `~/.gemini/antigravity/mcp.json` or workspace settings):
+Add the harness to your Antigravity MCP configuration (`~/.gemini/antigravity/mcp.json` or workspace MCP settings):
 
 ```json
 {
   "mcpServers": {
-    "code-harness": {
+    "debug-harness": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/<your-username>/debug-harness.git", "harness", "mcp"],
+      "args": [
+        "--from",
+        "git+https://github.com/<your-username>/debug-harness.git",
+        "harness",
+        "mcp"
+      ],
       "env": {
-        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
-        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
     }
   }
 }
 ```
 
-Now AGY can autonomously invoke:
-- `harness_fix(repo_path, issue, apply=True, use_harness=True)`
-- `harness_blast_radius(repo_path, node_id)`
+Once added, AGY automatically gains two deterministic tools:
+- **`harness_fix`**: Analyzes the issue, indexes the AST graph, locks cross-boundary dependents (DB ↔ Backend ↔ Frontend), calls Gemini with a bounded Context Stack, verifies the patch in a sandbox, and applies it.
+- **`harness_blast_radius`**: Inspects all direct, transitive, and cross-boundary callers and dependents of any symbol.
 
 ---
 
-### B. Claude Code Integration
+## 3. Model & API Key Configuration
 
-Register the harness with Claude Code CLI:
+The harness uses **Google Gemini** as its standard model (matching AGY's native runtime).
 
-```bash
-claude mcp add code-harness uvx --from git+https://github.com/<your-username>/debug-harness.git harness mcp
-```
+- **API Key**: Ensure `GEMINI_API_KEY` is set in your environment:
+  ```bash
+  export GEMINI_API_KEY="AIza..."
+  ```
+- **Default Model**: `gemini-1.5-flash` (fast, sub-second synthesis).
+- To override the model for high-complexity architectural changes, pass `--model`:
+  ```bash
+  harness fix --repo /path/to/project --issue "Fix schema drift" --model "gemini-1.5-pro"
+  ```
 
-Or in Claude Desktop (`~/.config/Claude/claude_desktop_config.json`):
+---
 
+## 4. How AGY Invokes the Harness
+
+When pair-programming with AGY, simply ask:
+> *"Use the debug-harness to fix the null pointer issue in the orders API and apply it."*
+
+AGY calls `harness_fix`:
 ```json
 {
-  "mcpServers": {
-    "code-harness": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/<your-username>/debug-harness.git", "harness", "mcp"]
-    }
-  }
+  "repo_path": "/home/hp/projects/my-app",
+  "issue": "Null pointer in discount calculation when discount_rate is None",
+  "apply": true,
+  "use_harness": true
 }
 ```
 
----
-
-### C. Cursor & OpenHands Integration
-
-In Cursor Settings → Features → MCP:
-- **Type**: `command`
-- **Command**: `uvx --from git+https://github.com/<your-username>/debug-harness.git harness mcp`
+### The Toggle (`use_harness`):
+- **`use_harness: true` (Default)**: Full deterministic pipeline — AST indexer, System-1 edge scoring, blast radius locking, and sandbox verification.
+- **`use_harness: false`**: Standard baseline agent mode without the graph parser or sandbox gate (records telemetry parameters only).
 
 ---
 
-### D. Direct Python SDK in Custom Agents
+## 5. Direct Terminal Usage (Optional)
 
-If your agent is written in Python (LangChain, LlamaIndex, AutoGen, custom loop):
+You can also run the harness directly from your terminal:
 
-```python
-from code_harness import Harness
-
-# Initialize targeting a workspace
-harness = Harness(
-    repo_path="/path/to/target/project",
-    use_harness=True,                         # Toggle ON: deterministic parser + sandbox
-    model="gemini-1.5-flash",                 # Or gpt-4o, claude-3-5-sonnet, local
-)
-
-# Run bugfix pipeline
-result = harness.fix(
-    issue="Order total calculation throws NoneType discount_rate error",
-    apply=True,  # Commit verified diffs directly to files
-)
-
-if result.success:
-    print(f"Verified & applied! Plan ID: {result.plan_id}")
-    print(f"Files touched: {result.touched_files}")
-else:
-    print(f"Fix failed sandbox gate: {result.diagnostics}")
-```
-
----
-
-## 3. Configuring Models & API Providers
-
-Developers use different models for different tasks (e.g., cheap fast models for triage, frontier models for complex architectural mutations, or local self-hosted models for privacy).
-
-### Supported Provider Environment Variables
-
-| Provider / Target | Environment Variable | Default Model Example |
-|---|---|---|
-| **Google Gemini** | `export GEMINI_API_KEY="AIza..."` | `gemini-1.5-flash`, `gemini-1.5-pro` |
-| **OpenAI** | `export OPENAI_API_KEY="sk-..."` | `gpt-4o-mini`, `gpt-4o` |
-| **Anthropic / OpenRouter** | `export OPENAI_BASE_URL="https://openrouter.ai/api/v1"`<br>`export OPENAI_API_KEY="sk-or-..."` | `anthropic/claude-3.5-sonnet` |
-| **Local (Ollama / vLLM)** | `export OPENAI_BASE_URL="http://localhost:11434/v1"`<br>`export OPENAI_API_KEY="ollama"` | `qwen2.5-coder:7b`, `deepseek-coder` |
-
-### Multi-Model Usage Strategies
-
-#### 1. Fast Routine Bugfixes (Cost/Latency Efficient)
 ```bash
-harness fix --repo ./my_app --issue "Fix regex phone parser" --model "gemini-1.5-flash" --apply
+# Analyze and verify patch (dry run)
+harness fix --repo /path/to/project --issue "Fix order discount error"
+
+# Apply verified patch to files
+harness fix --repo /path/to/project --issue "Fix order discount error" --apply
+
+# Trace reachability & cross-boundary dependencies
+harness blast-radius --repo /path/to/project --node "fn:routes.py#compute_total"
 ```
-
-#### 2. Deep Cross-Boundary Refactors (High Reasoning)
-```bash
-harness fix --repo ./my_app --issue "Migrate discount schema from float to object" --model "gpt-4o" --apply
-```
-
-#### 3. Air-Gapped / Local Inference (Zero Data Leakage)
-Start Ollama or vLLM locally, then:
-```bash
-export OPENAI_BASE_URL="http://localhost:11434/v1"
-harness fix --repo ./my_app --issue "Fix indexing bug" --model "qwen2.5-coder:7b" --apply
-```
-
----
-
-## 4. The Toggle: When to Use What
-
-| Parameter | `--harness` (Default) | `--no-harness` |
-|---|---|---|
-| **Graph Indexing** | Deterministic AST + cross-boundary linking | Skipped |
-| **Context Window** | Minimal scoped slices (< 2,000 tokens) | Raw whole files |
-| **Atomic Contract** | Locks DB + API + Frontend | Single file prompt |
-| **Sandbox Gate** | AST syntax check + targeted tests | Unverified |
-| **Best Used For** | Production codebases, multi-layer bugs | Quick raw prompt generation |
