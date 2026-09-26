@@ -27,6 +27,62 @@ console = Console()
 
 
 @app.command()
+def prepare(
+    repo: str = typer.Option(".", "--repo", "-r", help="Path to target project"),
+    issue: str = typer.Option(..., "--issue", "-i", help="Error message or problem description"),
+    symptom: Optional[str] = typer.Option(None, "--symptom", "-s", help="Optional symptom node or file:line"),
+) -> None:
+    """Phase 1: Deterministically lock cross-boundary dependents and print ContextStack."""
+    repo_path = Path(repo).resolve()
+    harness = Harness(repo_path=repo_path)
+    prep = harness.prepare(issue=issue, symptom_node=symptom)
+
+    console.print(f"[bold cyan][*] Plan Prepared:[/bold cyan] {prep.plan_id}")
+    console.print(f"    Target: [bold]{prep.target_node}[/bold] in {prep.target_file}")
+    console.print(f"    Estimated Tokens: {prep.estimated_tokens}")
+
+    if prep.locked_dependents:
+        table = Table(title="Locked Dependents (Mandatory Atomic Contract)")
+        table.add_column("Kind", style="cyan")
+        table.add_column("Node ID", style="bold")
+        table.add_column("File", style="dim")
+        for dep in prep.locked_dependents:
+            table.add_row(dep.kind, dep.node_id, dep.file_path)
+        console.print(table)
+
+    console.print(f"\n[bold]=== Context Stack ===[/bold]\n{prep.context_stack}\n")
+    console.print(f"[bold yellow]Instructions:[/bold yellow] {prep.instructions}")
+
+
+@app.command()
+def verify(
+    repo: str = typer.Option(".", "--repo", "-r", help="Path to target project"),
+    plan_id: str = typer.Option(..., "--plan-id", "-p", help="Plan ID from harness prepare"),
+    patch: str = typer.Option(..., "--patch", help="Replacement code or file path containing patch"),
+    apply: bool = typer.Option(True, "--apply/--no-apply", help="Commit verified diff to disk"),
+) -> None:
+    """Phase 2: Verify patch in sandbox and apply to disk."""
+    repo_path = Path(repo).resolve()
+    harness = Harness(repo_path=repo_path)
+
+    # Check if patch argument is a file path
+    patch_text = patch
+    p = Path(patch)
+    if p.exists() and p.is_file():
+        patch_text = p.read_text(encoding="utf-8")
+
+    res = harness.verify_and_apply(plan_id=plan_id, target_patch=patch_text, apply=apply)
+    if res.passed:
+        console.print(f"[bold green][✓] Sandbox Verification Passed! Status: {res.status}[/bold green]")
+        if res.applied:
+            console.print(f"    Applied changes to: {res.touched_files}")
+    else:
+        console.print(f"[bold red][✗] Verification Failed! Status: {res.status}[/bold red]")
+        for d in res.diagnostics:
+            console.print(f"    • {d}")
+
+
+@app.command()
 def fix(
     repo: str = typer.Option(".", "--repo", "-r", help="Path to project directory to fix"),
     issue: str = typer.Option(..., "--issue", "-i", help="Description of the bug or problem"),
@@ -36,20 +92,18 @@ def fix(
         "--harness/--no-harness",
         help="Toggle deterministic graph parser & contract on or off",
     ),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name (e.g. gemini-1.5-flash, gpt-4o)"),
     symptom: Optional[str] = typer.Option(None, "--symptom", "-s", help="Optional symptom node or file:line"),
 ) -> None:
-    """Analyze issue, call LLM with scoped ContextStack, verify via sandbox, and apply."""
+    """One-shot fix for terminal execution."""
     repo_path = Path(repo).resolve()
     mode_label = "Harness (Deterministic Graph)" if use_harness else "Baseline (Raw Context)"
     console.print(f"[bold cyan][*] Running Fix on:[/bold cyan] {repo_path}")
     console.print(f"    Mode: [bold yellow]{mode_label}[/bold yellow]")
     console.print(f"    Issue: {issue}\n")
 
-    harness = Harness(repo_path=repo_path, use_harness=use_harness, model=model)
+    harness = Harness(repo_path=repo_path, use_harness=use_harness)
     result = harness.fix(issue=issue, apply=apply, symptom_node=symptom)
 
-    # Output status
     if result.success:
         console.print(f"[bold green][✓] Fix Verified Successfully! Status: {result.verification_status}[/bold green]")
     else:
@@ -64,20 +118,12 @@ def fix(
     table = Table(title="Execution Telemetry")
     table.add_column("Parameter", style="cyan")
     table.add_column("Value", style="magenta")
-    table.add_row("LLM API Calls", str(result.metrics.llm_api_calls))
     table.add_row("Input Tokens", f"{result.metrics.input_tokens:,}")
     table.add_row("Output Tokens", f"{result.metrics.output_tokens:,}")
     table.add_row("Total Tokens", f"{result.metrics.total_tokens:,}")
     table.add_row("Execution Time", f"{result.metrics.wall_clock_seconds:.2f}s")
     table.add_row("Verification Gate", result.verification_status)
-    if result.metrics.total_atomic_dependents > 0:
-        table.add_row("Locked Dependents", f"{result.metrics.atomic_dependents_locked} / {result.metrics.total_atomic_dependents}")
     console.print(table)
-
-    if result.diagnostics:
-        console.print("\n[bold]Diagnostics / Logs:[/bold]")
-        for d in result.diagnostics:
-            console.print(f"  • {d}")
 
 
 @app.command()
@@ -112,54 +158,6 @@ def index(
         count = len(graph.find_nodes_by_kind(kind))
         if count > 0:
             table.add_row(kind.value, str(count))
-    console.print(table)
-
-
-@app.command()
-def trace(
-    symptom: str = typer.Option(..., "--symptom", "-s", help="Symptom node ID or file:line"),
-    repo: str = typer.Option(".", "--repo", "-r", help="Path to repository"),
-    query: str = typer.Option("exception error", "--query", "-q", help="Error text or query"),
-) -> None:
-    """Trace root cause using bounded graph traversal and System-1 edge scoring."""
-    repo_path = Path(repo).resolve()
-    indexer = RepositoryIndexer(repo_path)
-    graph = indexer.index()
-    scorer = System1Scorer()
-
-    target_node = graph.get_node(symptom)
-    if not target_node and ":" in symptom:
-        parts = symptom.split(":")
-        try:
-            line_no = int(parts[1])
-            target_node = graph.find_node_by_span(parts[0], line_no)
-        except Exception:
-            pass
-
-    if not target_node:
-        all_fns = graph.find_nodes_by_kind(NodeKind.FUNCTION)
-        target_node = all_fns[0] if all_fns else None
-
-    if not target_node:
-        console.print("[red][✗] Error: Could not resolve symptom node in graph.[/red]")
-        raise typer.Exit(code=1)
-
-    candidates = []
-    for pred, edge in graph.predecessors(target_node.id):
-        candidates.append((pred, edge, [target_node.id]))
-    for succ, edge in graph.successors(target_node.id):
-        candidates.append((succ, edge, [target_node.id]))
-
-    ranked = scorer.score_candidates(query, candidates)
-
-    table = Table(title=f"Root-Cause Candidates (Epoch {graph.graph_epoch})")
-    table.add_column("Rank", justify="center")
-    table.add_column("Node ID", style="bold")
-    table.add_column("Edge Kind", style="cyan")
-    table.add_column("Calibrated Score", justify="right", style="green")
-    for i, c in enumerate(ranked[:5], 1):
-        edge_name = c.edge.kind.value if c.edge else "Direct"
-        table.add_row(str(i), c.node.id, edge_name, f"{c.calibrated_score:.4f}")
     console.print(table)
 
 

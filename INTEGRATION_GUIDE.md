@@ -1,19 +1,23 @@
 # Antigravity (AGY) Integration Guide
 
-Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)** as a Model Context Protocol (MCP) server directly from GitHub.
+Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)** as an MCP server directly from GitHub.
+
+**Zero Extra API Keys Required**: The harness uses an Inversion-of-Control protocol. It extracts the deterministic context and verifies patches in a sandbox, while AGY synthesizes the code using its own active model session.
 
 ---
 
 ## 1. Quick Install via GitHub
 
-No local cloning needed. AGY can invoke the harness using `uvx` or a global `uv tool` install:
+Run ephemerally with `uvx` (zero pre-install required):
 
 ```bash
-# Global CLI installation
-uv tool install git+https://github.com/harshgupta-23/debug-harness.git
-
-# Or run ephemerally with uvx (zero pre-install required)
 uvx --from git+https://github.com/harshgupta-23/debug-harness.git harness --help
+```
+
+Or install globally:
+
+```bash
+uv tool install git+https://github.com/harshgupta-23/debug-harness.git
 ```
 
 ---
@@ -32,69 +36,66 @@ Add the harness to your Antigravity MCP configuration (`~/.gemini/antigravity/mc
         "git+https://github.com/harshgupta-23/debug-harness.git",
         "harness",
         "mcp"
-      ],
-      "env": {
-        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
-      }
+      ]
     }
   }
 }
 ```
 
-Once added, AGY automatically gains two deterministic tools:
-- **`harness_fix`**: Analyzes the issue, indexes the AST graph, locks cross-boundary dependents (DB ↔ Backend ↔ Frontend), calls Gemini with a bounded Context Stack, verifies the patch in a sandbox, and applies it.
-- **`harness_blast_radius`**: Inspects all direct, transitive, and cross-boundary callers and dependents of any symbol.
+*Note: No `env` or `API_KEY` is required because AGY performs the generation using its own model connection.*
 
 ---
 
-## 3. Model & API Key Configuration
+## 3. How AGY Uses the Harness (Two-Phase Protocol)
 
-The harness uses **Google Gemini** as its standard model (matching AGY's native runtime).
+When pair-programming with AGY, ask:
+> *"Use the debug-harness to fix the null pointer issue in the orders API."*
 
-- **API Key**: Ensure `GEMINI_API_KEY` is set in your environment:
-  ```bash
-  export GEMINI_API_KEY="AIza..."
-  ```
-- **Default Model**: `gemini-1.5-flash` (fast, sub-second synthesis).
-- To override the model for high-complexity architectural changes, pass `--model`:
-  ```bash
-  harness fix --repo /path/to/project --issue "Fix schema drift" --model "gemini-1.5-pro"
-  ```
-
----
-
-## 4. How AGY Invokes the Harness
-
-When pair-programming with AGY, simply ask:
-> *"Use the debug-harness to fix the null pointer issue in the orders API and apply it."*
-
-AGY calls `harness_fix`:
+### Phase 1: Context Preparation & Contract Locking
+AGY invokes:
 ```json
+// Tool: harness_prepare
 {
-  "repo_path": "/home/hp/projects/my-app",
-  "issue": "Null pointer in discount calculation when discount_rate is None",
-  "apply": true,
-  "use_harness": true
+  "repo_path": "/path/to/project",
+  "issue": "Null pointer in discount calculation when discount_rate is None"
 }
 ```
+**Harness returns:**
+- `plan_id`: Unique identifier (e.g. `amp_8c41f92e`).
+- `target_node`: Exact function to edit (`fn:routes.py#compute_total`).
+- `locked_dependents`: All cross-boundary dependents that must be updated together (e.g. `client.js`, `models.py`).
+- `context_stack`: Field-level projected slices (< 1,500 tokens). AGY does not search the codebase or read whole files.
 
-### The Toggle (`use_harness`):
-- **`use_harness: true` (Default)**: Full deterministic pipeline — AST indexer, System-1 edge scoring, blast radius locking, and sandbox verification.
-- **`use_harness: false`**: Standard baseline agent mode without the graph parser or sandbox gate (records telemetry parameters only).
+### Phase 2: Sandbox Verification & Atomic Commit
+AGY writes the clean patch using its own model session and submits it:
+```json
+// Tool: harness_verify_and_apply
+{
+  "repo_path": "/path/to/project",
+  "plan_id": "amp_8c41f92e",
+  "target_patch": "def compute_total(base_amount: float, discount_rate: float | None = None) -> float:\n    ...",
+  "apply": true
+}
+```
+**Harness executes:**
+1. Applies patch to an in-memory overlay (zero premature disk writes).
+2. Runs AST syntax & diagnostic check.
+3. Queries call graph for tests reaching modified nodes and runs them (`pytest`).
+4. If verified, commits changes to disk and returns `SANDBOX_VERIFIED`. If broken, returns compiler/test diagnostics for AGY to self-correct.
 
 ---
 
-## 5. Direct Terminal Usage (Optional)
+## 4. Direct Terminal Usage (Optional)
 
-You can also run the harness directly from your terminal:
+Developers can also run the two phases manually in terminal:
 
 ```bash
-# Analyze and verify patch (dry run)
-harness fix --repo /path/to/project --issue "Fix order discount error"
+# Phase 1: Prepare context & lock contract
+harness prepare --repo ./my_project --issue "Fix order discount null error"
 
-# Apply verified patch to files
-harness fix --repo /path/to/project --issue "Fix order discount error" --apply
+# Phase 2: Verify & apply proposed patch
+harness verify --repo ./my_project --plan-id "amp_8c41f92e" --patch ./fix.py --apply
 
-# Trace reachability & cross-boundary dependencies
-harness blast-radius --repo /path/to/project --node "fn:routes.py#compute_total"
+# Or standalone one-shot run:
+harness fix --repo ./my_project --issue "Fix order discount null error" --apply
 ```

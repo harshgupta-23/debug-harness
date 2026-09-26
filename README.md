@@ -54,36 +54,23 @@ harness fix --repo ./my_project --issue "Fix bug" --model "gemini-1.5-flash"
 
 ## 🤖 Using Inside Antigravity (AGY) & Other Agents
 
-### Option 1: Python SDK (Direct Import)
-```python
-from code_harness import Harness
+The harness uses an **Inversion-of-Control** protocol. **Zero extra API keys are needed** because AGY uses its own active model session to generate the code.
 
-harness = Harness(repo_path="./my_project", use_harness=True)
-result = harness.fix(issue="Fix discount null pointer", apply=True)
-
-print(result.verification_status)  # "SANDBOX_VERIFIED"
-print(result.metrics)              # Tokens, latency, calls
-```
-
-### Option 2: Model Context Protocol (MCP) Server
-Launch the stdio MCP server for AGY, Cursor, Claude Code, or OpenHands:
-```bash
-harness mcp
-```
-Configure in your agent's MCP settings (`mcp.json`):
+Add to your AGY MCP config (`~/.gemini/antigravity/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "code-harness": {
-      "command": "harness",
-      "args": ["mcp"]
+    "debug-harness": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/harshgupta-23/debug-harness.git", "harness", "mcp"]
     }
   }
 }
 ```
-Exposes tools:
-- `harness_fix(repo_path, issue, apply, use_harness)`
-- `harness_blast_radius(repo_path, node_id)`
+
+### Two-Phase Agent Protocol
+1. **`harness_prepare(repo_path, issue)`**: Deterministically builds the call-graph, locks all cross-boundary dependents (DB ↔ Backend ↔ Frontend), and returns a bounded `<1,500` token Context Stack.
+2. **`harness_verify_and_apply(repo_path, plan_id, target_patch, apply)`**: Verification sandbox gate. Runs AST syntax validation and targeted `pytest` tests before committing edits to disk.
 
 ---
 

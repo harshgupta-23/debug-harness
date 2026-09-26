@@ -1,6 +1,8 @@
-"""Standard Model Context Protocol (MCP) stdio server for external agent integration.
+"""Standard Model Context Protocol (MCP) stdio server for AGY.
 
-Allows tools like Antigravity (AGY), Claude Code, Cursor, and OpenHands to invoke the harness.
+Enforces zero-API-key Inversion of Control:
+1. harness_prepare: Provides deterministic ContextStack and locks Atomic Contract.
+2. harness_verify_and_apply: Runs sandbox verification gate on AGY's proposed patch.
 """
 
 from __future__ import annotations
@@ -15,27 +17,41 @@ from code_harness.harness import Harness
 
 TOOLS = [
     {
-        "name": "harness_fix",
-        "description": "Fix a bug in a codebase using deterministic AST graph traversal, blast-radius locking, and sandbox verification.",
+        "name": "harness_prepare",
+        "description": "Deterministically index repository, lock cross-boundary dependents, and return a bounded Context Stack for an issue. Zero extra API keys needed.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "repo_path": {"type": "string", "description": "Absolute path to repository directory."},
-                "issue": {"type": "string", "description": "Description of bug or error to fix."},
-                "apply": {"type": "boolean", "description": "Whether to write verified fix directly to disk.", "default": False},
-                "use_harness": {"type": "boolean", "description": "Toggle harness on (deterministic parser) or off (baseline).", "default": True},
+                "repo_path": {"type": "string", "description": "Path to target repository folder."},
+                "issue": {"type": "string", "description": "Error message, test failure, or bug description."},
+                "symptom": {"type": "string", "description": "Optional function name or file:line anchor."},
             },
             "required": ["repo_path", "issue"],
         },
     },
     {
-        "name": "harness_blast_radius",
-        "description": "Compute reachability and cross-boundary dependents (DB ↔ Backend ↔ Frontend) for a symbol.",
+        "name": "harness_verify_and_apply",
+        "description": "Verification sandbox gate: test model-authored diff against AST syntax and graph-targeted tests before applying.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "repo_path": {"type": "string", "description": "Path to repository."},
-                "node_id": {"type": "string", "description": "Target symbol or node ID (e.g. fn:routes.py#compute_total)."},
+                "repo_path": {"type": "string", "description": "Path to target repository folder."},
+                "plan_id": {"type": "string", "description": "Plan ID returned by harness_prepare."},
+                "target_patch": {"type": "string", "description": "Clean replacement code for the target function."},
+                "dependent_patches": {"type": "object", "description": "Optional mapping of dependent node ID to replacement code."},
+                "apply": {"type": "boolean", "description": "Write verified changes directly to files if passed.", "default": True},
+            },
+            "required": ["repo_path", "plan_id", "target_patch"],
+        },
+    },
+    {
+        "name": "harness_blast_radius",
+        "description": "Inspect reachability, cross-boundary dependents (DB ↔ Backend ↔ Frontend), and safety policy for any symbol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Path to target repository folder."},
+                "node_id": {"type": "string", "description": "Symbol or node ID (e.g. fn:routes.py#compute_total)."},
             },
             "required": ["repo_path", "node_id"],
         },
@@ -43,8 +59,19 @@ TOOLS = [
 ]
 
 
+# Persistent harness instances per repo
+_HARNESS_CACHE: Dict[str, Harness] = {}
+
+
+def get_harness(repo_path: str) -> Harness:
+    p = str(Path(repo_path).resolve())
+    if p not in _HARNESS_CACHE:
+        _HARNESS_CACHE[p] = Harness(repo_path=p)
+    return _HARNESS_CACHE[p]
+
+
 def run_stdio_mcp() -> None:
-    """Run JSON-RPC 2.0 stdio loop for MCP clients."""
+    """Run JSON-RPC 2.0 stdio server loop."""
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -64,24 +91,32 @@ def run_stdio_mcp() -> None:
 
         elif method == "tools/call":
             tool_name = params.get("name")
-            arguments = params.get("arguments", {})
+            args = params.get("arguments", {})
 
             try:
-                if tool_name == "harness_fix":
-                    harness = Harness(
-                        repo_path=arguments.get("repo_path", "."),
-                        use_harness=arguments.get("use_harness", True),
-                    )
-                    res = harness.fix(
-                        issue=arguments.get("issue", ""),
-                        apply=arguments.get("apply", False),
+                repo_path = args.get("repo_path", ".")
+                harness = get_harness(repo_path)
+
+                if tool_name == "harness_prepare":
+                    res = harness.prepare(
+                        issue=args.get("issue", ""),
+                        symptom_node=args.get("symptom"),
                     )
                     content = res.model_dump_json(indent=2)
+
+                elif tool_name == "harness_verify_and_apply":
+                    res = harness.verify_and_apply(
+                        plan_id=args.get("plan_id", ""),
+                        target_patch=args.get("target_patch", ""),
+                        dependent_patches=args.get("dependent_patches"),
+                        apply=args.get("apply", True),
+                    )
+                    content = res.model_dump_json(indent=2)
+
                 elif tool_name == "harness_blast_radius":
-                    harness = Harness(repo_path=arguments.get("repo_path", "."))
-                    graph = harness.indexer.index()
+                    graph = harness.ensure_indexed()
                     report = harness.blast_engine.compute_blast_radius(
-                        graph, arguments.get("node_id", "")
+                        graph, args.get("node_id", "")
                     )
                     content = report.model_dump_json(indent=2)
                 else:
@@ -109,7 +144,7 @@ def run_stdio_mcp() -> None:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "code-harness-mcp", "version": "0.1.0"},
+                    "serverInfo": {"name": "debug-harness-mcp", "version": "0.1.0"},
                 },
             }
             sys.stdout.write(json.dumps(resp) + "\n")
