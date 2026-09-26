@@ -31,8 +31,8 @@ test = [
 ]
 
 [project.scripts]
-harness = "code_harness.cli:app"
-debug-harness = "code_harness.cli:app"
+harness = "code_harness.cli:main"
+debug-harness = "code_harness.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/code_harness"]

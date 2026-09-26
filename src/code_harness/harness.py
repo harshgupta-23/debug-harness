@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import networkx as nx
 from pydantic import BaseModel, Field
 
 from code_harness.core.graph import CodeGraph, GraphNode, NodeKind
@@ -75,11 +76,26 @@ class Harness:
             self.graph = self.indexer.index()
         return self.graph
 
+    def get_outline(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Return compact map of all files and their top-level symbols."""
+        graph = self.ensure_indexed()
+        outline: Dict[str, List[Dict[str, Any]]] = {}
+        for node in graph.nodes:
+            if node.kind in (NodeKind.FUNCTION, NodeKind.CLASS, NodeKind.ENDPOINT):
+                outline.setdefault(node.file_path, []).append({
+                    "id": node.id,
+                    "name": node.name,
+                    "kind": node.kind.value,
+                    "lines": f"{node.span.start_line}-{node.span.end_line}",
+                })
+        return outline
+
     def step(
         self,
         session_id: Optional[str] = None,
         issue: Optional[str] = None,
         symptom: Optional[str] = None,
+        symptoms: Optional[List[str]] = None,
         curr_patch: Optional[str] = None,
         modify_next_nodes: Optional[List[str]] = None,
         apply: bool = True,
@@ -93,13 +109,11 @@ class Harness:
         session_data = self._load_session(session_id) if session_id else None
         if not session_data:
             sess_id = session_id or f"step_{uuid.uuid4().hex[:8]}"
+            all_symptoms = [s for s in (symptoms or []) if s]
+            if symptom and symptom not in all_symptoms:
+                all_symptoms.insert(0, symptom)
 
-            # Resolve starting target node
-            target_id = symptom
-            if not target_id or not graph.has_node(target_id):
-                candidates = [(n, None, []) for n in graph.find_nodes_by_kind(NodeKind.FUNCTION)]
-                ranked = self.scorer.score_candidates(issue or "error", candidates)
-                target_id = ranked[0].node.id if ranked else None
+            target_id, pending_queue, log_meta = self._resolve_start_points(all_symptoms, issue, graph)
 
             if not target_id or not graph.has_node(target_id):
                 return StepState(
@@ -113,18 +127,21 @@ class Harness:
                 "session_id": sess_id,
                 "repo_path": str(self.repo_path),
                 "curr_id": target_id,
-                "pending_queue": [],
+                "pending_queue": pending_queue,
                 "visited_nodes": [target_id],
-                "patches": {},  # node_id -> patch_code
+                "patches": {},
                 "apply": apply,
+                "issue": issue or "",
+                "log_meta": log_meta,
+                "history": [],
             }
+            self._record_history_step(session_data, target_id, graph, patch=None, queued=pending_queue)
             self._save_session(sess_id, session_data)
             return self._build_step_state(sess_id, session_data, graph)
 
         # -------------------------------------------------------------
         # 2. Advance Existing Session
         # -------------------------------------------------------------
-        session_data = self._load_session(session_id)
         curr_id = session_data["curr_id"]
         pending_queue: List[str] = session_data.get("pending_queue", [])
         visited: List[str] = session_data.get("visited_nodes", [])
@@ -135,15 +152,18 @@ class Harness:
             patches[curr_id] = self._extract_clean_code(curr_patch)
 
         # Queue marked neighbors to modify next (if not already visited or queued)
+        newly_queued: List[str] = []
         for next_id in (modify_next_nodes or []):
             if graph.has_node(next_id) and next_id not in visited and next_id not in pending_queue:
                 pending_queue.append(next_id)
+                newly_queued.append(next_id)
+
+        self._record_history_step(session_data, curr_id, graph, patch=curr_patch, queued=newly_queued)
 
         # -------------------------------------------------------------
         # 3. Step to Next Node or Complete
         # -------------------------------------------------------------
         if pending_queue:
-            # Advance to next link sequentially
             next_curr_id = pending_queue.pop(0)
             visited.append(next_curr_id)
             session_data["curr_id"] = next_curr_id
@@ -153,7 +173,7 @@ class Harness:
             self._save_session(session_id, session_data)
             return self._build_step_state(session_id, session_data, graph)
 
-        # All links processed (queue is empty) -> Verify and Apply
+        # All links processed -> Verify and Apply
         session_data["pending_queue"] = []
         session_data["patches"] = patches
         return self._finish_session(session_id, session_data, graph, apply)
@@ -294,6 +314,10 @@ class Harness:
 
         touched = list({e.file_path for e in plan.bundled_edits if e.patch.strip()})
 
+        session_data["verification_status"] = plan.status.value
+        session_data["diagnostics"] = verification.diagnostics
+        self._save_session(session_id, session_data)
+
         return StepState(
             session_id=session_id,
             done=True,
@@ -303,6 +327,178 @@ class Harness:
             diagnostics=verification.diagnostics,
             instructions="All requested links processed. Verification sandbox complete.",
         )
+
+    def _resolve_start_points(
+        self,
+        symptoms: List[str],
+        issue: Optional[str],
+        graph: CodeGraph,
+    ) -> Tuple[Optional[str], List[str], Dict[str, Any]]:
+        """Resolve 1..N symptom anchors into initial curr_id and pending queue."""
+        resolved: List[str] = []
+        for s in symptoms:
+            nid = self._match_symbol_to_node_id(s, graph)
+            if nid and nid not in resolved:
+                resolved.append(nid)
+
+        if not resolved:
+            candidates = [(n, None, []) for n in graph.find_nodes_by_kind(NodeKind.FUNCTION)]
+            ranked = self.scorer.score_candidates(issue or "error", candidates)
+            if ranked:
+                resolved.append(ranked[0].node.id)
+
+        if not resolved:
+            return None, [], {"type": "none"}
+
+        if len(resolved) == 1:
+            return resolved[0], [], {
+                "type": "single",
+                "symptom": symptoms[0] if symptoms else resolved[0],
+                "start_node": resolved[0],
+            }
+
+        # Multi-symptom resolution: compute common graph intersection
+        g = graph._graph
+        undirected = g.to_undirected()
+
+        # Shared descendants (common callees) or shared ancestors (common callers/orchestrators)
+        common_desc = set.intersection(*(nx.descendants(g, s) | {s} for s in resolved))
+        common_anc = set.intersection(*(nx.ancestors(g, s) | {s} for s in resolved))
+
+        # Prefer shared callees (common root functions) over callers
+        non_self_desc = common_desc - set(resolved)
+        non_self_anc = common_anc - set(resolved)
+        candidates = non_self_desc or common_desc or non_self_anc or common_anc
+
+        # Filter to actual functions/classes if possible
+        func_candidates = [
+            c for c in candidates
+            if graph.get_node(c) and graph.get_node(c).kind in (NodeKind.FUNCTION, NodeKind.CLASS)
+        ]
+        pool = func_candidates or list(candidates)
+
+        if pool:
+            def dist(node: str) -> int:
+                try:
+                    return sum(nx.shortest_path_length(undirected, node, s) for s in resolved)
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    return 9999
+
+            best_root = min(pool, key=dist)
+            return best_root, [], {
+                "type": "shared_root",
+                "symptoms": symptoms,
+                "start_node": best_root,
+                "reason": f"Symptoms share graph path '{best_root}'. Collapsed to common root cause.",
+            }
+
+        # Disjoint symptoms: queue sequentially
+        return resolved[0], resolved[1:], {
+            "type": "disjoint",
+            "symptoms": symptoms,
+            "start_node": resolved[0],
+            "queued": resolved[1:],
+            "reason": "Disjoint bug paths detected. Traversal will address each symptom sequentially.",
+        }
+
+    def _match_symbol_to_node_id(self, sym: str, graph: CodeGraph) -> Optional[str]:
+        if graph.has_node(sym):
+            return sym
+        # Exact name or suffix match (#sym)
+        for node in graph.nodes:
+            if node.name == sym or node.id.endswith(f"#{sym}"):
+                return node.id
+        # Case-insensitive name match
+        for node in graph.nodes:
+            if node.name.lower() == sym.lower():
+                return node.id
+        # Substring in name or ID
+        for node in graph.nodes:
+            if sym.lower() in node.name.lower() or sym.lower() in node.id.lower():
+                return node.id
+        return None
+
+    def _record_history_step(
+        self,
+        session_data: Dict[str, Any],
+        curr_id: str,
+        graph: CodeGraph,
+        patch: Optional[str] = None,
+        queued: Optional[List[str]] = None,
+    ) -> None:
+        curr_node = graph.get_node(curr_id)
+        if not curr_node:
+            return
+        entry = {
+            "step": len(session_data.get("history", [])) + 1,
+            "curr_id": curr_id,
+            "curr_name": curr_node.name,
+            "curr_file": curr_node.file_path,
+            "curr_lines": f"{curr_node.span.start_line}-{curr_node.span.end_line}",
+            "upstream": [p.id for p, _ in graph.predecessors(curr_id)],
+            "downstream": [s.id for s, _ in graph.successors(curr_id)],
+            "patch_applied": bool(patch and patch.strip()),
+            "queued_next": queued or [],
+        }
+        session_data.setdefault("history", []).append(entry)
+
+    def format_logs(self, session_id: str) -> str:
+        """Format detailed traversal log separating bugs, start nodes, and step history."""
+        data = self._load_session(session_id)
+        if not data:
+            return f"No session data found for ID '{session_id}'."
+
+        meta = data.get("log_meta", {})
+        history = data.get("history", [])
+        patches = data.get("patches", {})
+        status = data.get("verification_status", "IN_PROGRESS")
+
+        lines = [
+            "=" * 70,
+            f"DEBUG HARNESS TRAVERSAL LOG | Session: {session_id}",
+            "=" * 70,
+        ]
+        if data.get("issue"):
+            lines.append(f"Issue / Request: {data['issue']}")
+
+        lines.append("\n[BUGS & START NODES]")
+        b_type = meta.get("type", "single")
+        if b_type == "single":
+            lines.append(f"  • Bug / Symptom : {meta.get('symptom')}")
+            lines.append(f"  • Starting Node : {meta.get('start_node')}")
+        elif b_type == "shared_root":
+            lines.append(f"  • Multi-Symptom Bug Cluster: {meta.get('symptoms')}")
+            lines.append(f"  • Shared Root Start Node   : {meta.get('start_node')}")
+            lines.append(f"  • Resolution Strategy      : {meta.get('reason')}")
+        elif b_type == "disjoint":
+            lines.append(f"  • Independent Bug Queries  : {meta.get('symptoms')}")
+            lines.append(f"  • First Active Bug Node    : {meta.get('start_node')}")
+            lines.append(f"  • Queued Sequential Bugs   : {meta.get('queued')}")
+            lines.append(f"  • Resolution Strategy      : {meta.get('reason')}")
+
+        lines.append("\n[TRAVERSAL HISTORY]")
+        for h in history:
+            lines.append(f"\n--- Step {h['step']}: Focus: {h['curr_name']} ---")
+            lines.append(f"  Node ID     : {h['curr_id']}")
+            lines.append(f"  Location    : {h['curr_file']}:{h['curr_lines']}")
+            up = h.get("upstream", [])
+            lines.append(f"  Upstream   ({len(up)}): {', '.join(up) if up else 'None'}")
+            down = h.get("downstream", [])
+            lines.append(f"  Downstream ({len(down)}): {', '.join(down) if down else 'None'}")
+            lines.append(f"  Patched     : {'Yes' if h['patch_applied'] else 'No'}")
+            if h.get("queued_next"):
+                lines.append(f"  Queued Next : {', '.join(h['queued_next'])}")
+
+        lines.append("\n" + "=" * 70)
+        lines.append(f"VERIFICATION STATUS : {status}")
+        lines.append(f"Total Modified Nodes: {len(patches)} ({', '.join(patches.keys()) if patches else 'None'})")
+        diagnostics = data.get("diagnostics", [])
+        if diagnostics:
+            lines.append("Diagnostics:")
+            for d in diagnostics:
+                lines.append(f"  • {d}")
+        lines.append("=" * 70)
+        return "\n".join(lines)
 
     def _apply_plan_to_disk(self, plan: AtomicMutationPlan) -> None:
         edits_by_file: Dict[str, List[Any]] = {}

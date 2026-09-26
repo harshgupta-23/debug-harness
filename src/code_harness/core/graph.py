@@ -152,6 +152,10 @@ class CodeGraph:
     def all_nodes(self) -> List[GraphNode]:
         return list(self._nodes.values())
 
+    @property
+    def nodes(self) -> List[GraphNode]:
+        return list(self._nodes.values())
+
     def add_edge(
         self,
         source_id: str,

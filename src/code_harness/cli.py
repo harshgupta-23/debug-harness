@@ -31,9 +31,11 @@ def step(
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Existing session ID"),
     issue: Optional[str] = typer.Option(None, "--issue", "-i", help="Issue description on start"),
     symptom: Optional[str] = typer.Option(None, "--symptom", help="Initial function anchor"),
+    symptoms: Optional[List[str]] = typer.Option(None, "--symptoms", help="Multiple symptom anchors"),
     patch: Optional[str] = typer.Option(None, "--patch", "-p", help="Replacement code for 'curr' ONLY"),
     next_node: Optional[List[str]] = typer.Option(None, "--next", "-n", help="Neighbor node ID(s) to modify next"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Apply to disk when all links finish"),
+    logs: Optional[str] = typer.Option(None, "--logs", "-l", flag_value="-", help="Display traversal log or save to .txt"),
 ) -> None:
     """Step 1 node at a time through the code graph."""
     repo_path = Path(repo).resolve()
@@ -53,6 +55,7 @@ def step(
         session_id=session_id,
         issue=issue,
         symptom=symptom,
+        symptoms=symptoms,
         curr_patch=patch_text,
         modify_next_nodes=next_node,
         apply=apply,
@@ -70,6 +73,14 @@ def step(
             console.print(f"[bold red][✗] Session Finished with Status: {state.verification_status}[/bold red]")
             for d in state.diagnostics:
                 console.print(f"    • {d}")
+
+        if logs:
+            log_text = harness.format_logs(state.session_id)
+            if logs == "-":
+                console.print(f"\n{log_text}")
+            else:
+                Path(logs).write_text(log_text, encoding="utf-8")
+                console.print(f"\n[bold green][✓] Traversal log saved to: {logs}[/bold green]")
         return
 
     # Display curr
@@ -102,6 +113,43 @@ def step(
 
     if state.pending_queue:
         console.print(f"\n[yellow]Remaining Queued Nodes:[/yellow] {state.pending_queue}")
+
+    if logs:
+        log_text = harness.format_logs(state.session_id)
+        if logs == "-":
+            console.print(f"\n{log_text}")
+        else:
+            Path(logs).write_text(log_text, encoding="utf-8")
+            console.print(f"\n[bold green][✓] Traversal log saved to: {logs}[/bold green]")
+
+
+@app.command(name="logs")
+def logs_cmd(
+    session_id: str = typer.Argument(..., help="Session ID to dump logs for"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Optional .txt file to save log to"),
+    repo: str = typer.Option(".", "--repo", "-r", help="Repository path"),
+) -> None:
+    """View or export traversal logs for a session."""
+    harness = Harness(repo_path=Path(repo).resolve())
+    log_text = harness.format_logs(session_id)
+    if output:
+        Path(output).write_text(log_text, encoding="utf-8")
+        console.print(f"[bold green][✓] Traversal log saved to: {output}[/bold green]")
+    else:
+        console.print(log_text)
+
+
+@app.command(name="outline")
+def outline_cmd(
+    repo: str = typer.Option(".", "--repo", "-r", help="Path to repository"),
+) -> None:
+    """Display compact symbol outline of repository to locate start nodes."""
+    harness = Harness(repo_path=Path(repo).resolve())
+    out = harness.get_outline()
+    for file_path, symbols in out.items():
+        console.print(f"[bold cyan]{file_path}[/bold cyan]:")
+        for s in symbols:
+            console.print(f"  • {s['name']} [dim]({s['kind']}, lines {s['lines']})[/dim] -> [yellow]{s['id']}[/yellow]")
 
 
 @app.command()
@@ -171,5 +219,21 @@ def serve(
     run_proxy_server(port=port, repo_path=repo)
 
 
+def main() -> None:
+    """Entrypoint with support for optional argument on --logs/-l flag."""
+    import sys
+    args = sys.argv[1:]
+    normalized: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        normalized.append(a)
+        if a in ("--logs", "-l"):
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                normalized.append("-")
+        i += 1
+    app(normalized)
+
+
 if __name__ == "__main__":
-    app()
+    main()

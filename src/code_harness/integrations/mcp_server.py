@@ -17,6 +17,17 @@ from code_harness.harness import Harness
 
 TOOLS = [
     {
+        "name": "harness_outline",
+        "description": "Inspect concise codebase outline of all files, functions, classes, and endpoints to locate starting symptoms.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Path to target repository folder."},
+            },
+            "required": ["repo_path"],
+        },
+    },
+    {
         "name": "harness_step",
         "description": (
             "Step through code graph 1 node at a time. Returns 'curr' (file, lines, symbol, exact AST code) "
@@ -30,7 +41,12 @@ TOOLS = [
                 "repo_path": {"type": "string", "description": "Path to target repository folder."},
                 "session_id": {"type": "string", "description": "Session ID (omit on first call to start)."},
                 "issue": {"type": "string", "description": "Bug or problem description (used on first call)."},
-                "symptom": {"type": "string", "description": "Optional function name or file:line anchor."},
+                "symptom": {"type": "string", "description": "Optional single function name or file:line anchor."},
+                "symptoms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of multiple symptom anchors (computes shared root cause or queues disjoint bugs).",
+                },
                 "curr_patch": {"type": "string", "description": "Replacement code for 'curr' ONLY."},
                 "modify_next_nodes": {
                     "type": "array",
@@ -93,11 +109,16 @@ def run_stdio_mcp() -> None:
                 repo_path = args.get("repo_path", ".")
                 harness = get_harness(repo_path)
 
-                if tool_name == "harness_step":
+                if tool_name == "harness_outline":
+                    outline = harness.get_outline()
+                    content = json.dumps(outline, indent=2)
+
+                elif tool_name == "harness_step":
                     state = harness.step(
                         session_id=args.get("session_id"),
                         issue=args.get("issue"),
                         symptom=args.get("symptom"),
+                        symptoms=args.get("symptoms"),
                         curr_patch=args.get("curr_patch"),
                         modify_next_nodes=args.get("modify_next_nodes"),
                         apply=args.get("apply", True),
