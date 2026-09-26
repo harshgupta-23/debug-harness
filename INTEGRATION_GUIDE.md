@@ -2,7 +2,7 @@
 
 Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)** as an MCP server directly from GitHub.
 
-**Zero Extra API Keys Required**: The harness extracts deterministic AST code slices and enforces sandbox gates, while AGY synthesizes patches using its existing active model session.
+**Zero Extra API Keys Required**: The harness extracts deterministic AST code slices, prunes context, and enforces sandbox gates, while AGY synthesizes patches using its existing active model session.
 
 ---
 
@@ -44,28 +44,46 @@ Add to your Antigravity MCP configuration (`~/.gemini/antigravity/mcp.json` or w
 
 ---
 
-## 3. How AGY Uses the Stepper Tool (`harness_step`)
+## 3. Workflow: How AGY Interacts with the Harness
 
-The harness restricts AGY to **one function at a time**, displaying only the focused node and its immediate 1-hop neighbors:
+### Step 0: Inspect Symbol Outline (Optional)
+When AGY needs to map user complaints to exact codebase symbols:
+```json
+// Tool: harness_outline
+{
+  "repo_path": "/path/to/project"
+}
+```
+Returns a compact mapping of files to functions, classes, and routes.
 
-### Step 1: Initialize Session
-AGY invokes:
+---
+
+### Step 1: Initialize Session with 1..N Symptoms
+AGY can pass a single issue or multiple symptom symbols reported by the user:
+
 ```json
 // Tool: harness_step
 {
   "repo_path": "/path/to/project",
-  "issue": "Null pointer in discount calculation when discount_rate is None"
+  "issue": "Prices mismatch and checkout validation fails",
+  "symptoms": ["get_order_details", "checkout_route"]
 }
 ```
 
+**Harness Resolution:**
+* **Shared Root Cause**: Computes $\bigcap \text{Upstream/Downstream}$. If symptoms share a dependency (e.g., `compute_total`), the harness collapses them and sets `curr` to the common root cause.
+* **Disjoint Bugs**: If symptoms have no shared paths, sets `curr` to the first symptom and queues the remaining symptoms in `pending_queue`.
+
 **Harness returns:**
-- `curr`:
-  - `name`: `compute_total`
-  - `file_path`: `routes.py`
-  - `start_line`: 15, `end_line`: 19
-  - `code`: Exact AST function slice
-- `dependents_depth_1`: List of 1-hop upstream (callers) and downstream (callees/endpoints) nodes with the same fields (`name`, `file_path`, `lines`, `code`, `direction`, `relationship`).
-- `instructions`: *"Strictly restricted to edit ONLY 'curr'. Provide curr_patch, and specify which dependents need modification next in modify_next_nodes."*
+* `curr`:
+  * `name`: `compute_total`
+  * `file_path`: `routes.py`
+  * `start_line`: 15, `end_line`: 19
+  * `code`: Exact AST function slice
+* `dependents_depth_1`: 1-hop upstream (callers) and downstream (callees/endpoints) nodes with exact slices.
+* `instructions`: *"Strictly restricted to edit ONLY 'curr'. Provide curr_patch, and specify which dependents need modification next in modify_next_nodes."*
+
+---
 
 ### Step 2: Patch `curr` & Choose Next Link
 AGY returns:
@@ -79,11 +97,13 @@ AGY returns:
 }
 ```
 
-- The harness securely records the patch for `curr`.
-- The harness advances focus to `get_order_details`, loading its AST slice and *its* 1-hop neighborhood.
+* The harness records the patch for `curr`.
+* Focus shifts to `get_order_details`, loading its AST slice and *its* 1-hop neighborhood.
 
-### Step 3: Complete Traversal
-When all required nodes have been visited and patched:
+---
+
+### Step 3: Complete Traversal & Verify
+When all required nodes have been stepped and patched:
 ```json
 // Tool: harness_step
 {
@@ -95,20 +115,23 @@ When all required nodes have been visited and patched:
 }
 ```
 
-- The harness runs the multi-stage sandbox verification (in-memory AST overlay + targeted tests).
-- If verified, commits all changes atomically to disk.
-- Returns `done: true`, `verification_status: "SANDBOX_VERIFIED"`.
+* Harness executes multi-stage sandbox verification (in-memory AST overlay + targeted pytest execution).
+* If verified, commits all changes atomically to disk.
+* Returns `done: true`, `verification_status: "SANDBOX_VERIFIED"`.
 
 ---
 
-## 4. Direct Terminal Usage (Optional)
+## 4. CLI Traversal Logs
 
-You can also run the stepper manually from your terminal:
+Inspect the entire trajectory of bugs, starting nodes, and step-by-step traversal:
 
 ```bash
-# Start a step session
-harness step --repo ./my_project --issue "Fix order discount null error"
+# Dump traversal log to terminal:
+harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs
 
-# Advance to next node with patch
-harness step --repo ./my_project --session "step_8f075d95" --patch "def ..." --next "node_id"
+# Save traversal log to a text file:
+harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs traversal.txt
+
+# View logs for any past session:
+harness logs <session_id> [--output traversal.txt]
 ```

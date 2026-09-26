@@ -2,7 +2,7 @@
 
 [![Repository](https://img.shields.io/badge/GitHub-harshgupta--23%2Fdebug--harness-blue)](https://github.com/harshgupta-23/debug-harness)
 
-A developer engine and CLI that analyzes codebases, locks cross-boundary dependencies into atomic mutation plans, and verifies bug fixes using deterministic AST graphs and sandbox execution.
+A zero-API-key developer engine and CLI that maps codebases into typed AST dependency graphs, resolves single or multi-symptom bug entry points, enforces single-function edit boundaries, and gatekeeps code changes through sandbox verification.
 
 ---
 
@@ -15,28 +15,21 @@ uv tool install git+https://github.com/harshgupta-23/debug-harness.git
 # Or install locally in development:
 uv pip install -e .
 
-# Point to your project folder and fix a bug:
-harness fix --repo /path/to/project --issue "Fix NoneType error in calculate_total" --apply
+# 1. View codebase outline to find symbol anchors:
+harness outline --repo ./my_project
+
+# 2. Step 1 node at a time through the code graph:
+harness step --repo ./my_project --issue "Fix order discount calculation" --symptom compute_total
+
+# 3. Handle multiple glitches at once with traversal logging:
+harness step --repo ./my_project --symptoms checkout_route --symptoms cart_total --logs run_log.txt
 ```
 
 ---
 
-## 🎛️ Toggle: Harness vs Baseline Mode
+## 🤖 Using Inside Antigravity (AGY) & MCP Agents
 
-- **Toggle ON (Default)**: Full deterministic pipeline — AST indexing, System 1 candidate scoring, blast-radius cross-boundary locking (DB ↔ Backend ↔ Frontend), scoped Context Stack, and 3-stage Sandbox verification before applying.
-  ```bash
-  harness fix --repo /path/to/project --issue "Fix error" --harness
-  ```
-- **Toggle OFF**: Raw baseline agent mode without the graph parser or sandbox gate (records telemetry parameters only).
-  ```bash
-  harness fix --repo /path/to/project --issue "Fix error" --no-harness
-  ```
-
----
-
-## 🤖 Using Inside Antigravity (AGY) & Other Agents
-
-The harness uses an **Inversion-of-Control** protocol. **Zero extra API keys are needed** because AGY uses its own active model session to generate the code.
+The harness uses an **Inversion-of-Control** protocol. **Zero extra API keys or third-party models are needed** because AGY synthesizes code directly using its own active model connection.
 
 Add to your AGY MCP config (`~/.gemini/antigravity/mcp.json`):
 ```json
@@ -50,24 +43,52 @@ Add to your AGY MCP config (`~/.gemini/antigravity/mcp.json`):
 }
 ```
 
-### Stepper Agent Protocol (`harness_step`)
-- **`harness_step(repo_path, session_id, curr_patch, modify_next_nodes, apply)`**:
-  - Focuses on a single symbol `curr` with its exact AST code, file path, line numbers, and its depth-1 upstream/downstream neighbors.
-  - Strictly restricts AGY to patch ONLY `curr`.
-  - Queues chosen neighbor links sequentially until all links return False/0, then runs sandbox verification and commits to disk.
+### Exposed MCP Tools
+
+1. **`harness_outline`**:
+   - `repo_path`: Path to target repository.
+   - Returns a compact JSON map of all files and their top-level symbols (functions, classes, endpoints, line ranges).
+   
+2. **`harness_step`**:
+   - `repo_path`: Path to target repository.
+   - `session_id`: Omit on first call to initialize; provide on subsequent calls.
+   - `issue`: Problem or bug description.
+   - `symptom`: Optional single function or anchor name.
+   - `symptoms`: Optional list of multiple symptom symbol names.
+     - **Shared Root**: If symptoms share common upstream callers or downstream callees, collapses to 1 shared root cause.
+     - **Disjoint**: If symptoms are independent, queues them sequentially.
+   - `curr_patch`: Replacement code for `curr` ONLY (**Strict Restriction**).
+   - `modify_next_nodes`: List of depth-1 neighbor node IDs that need editing next.
+   - `apply`: Verify in sandbox and write to disk when all links return empty (`default: true`).
+
+3. **`harness_blast_radius`**:
+   - `repo_path`: Path to target repository.
+   - `node_id`: Target symbol ID.
+   - Returns reachability analysis and cross-boundary safety policies.
 
 ---
 
-## 🛠️ Additional Commands
+## 🛠️ CLI Reference
+
 ```bash
-# Step 1 node at a time through the code graph
-harness step --repo ./my_project --issue "Fix order discount null error"
-# Inspect graph nodes and edges
+# Display compact symbol outline:
+harness outline --repo ./my_project
+
+# Single-symptom step session:
+harness step --repo ./my_project --symptom compute_total
+
+# Multi-symptom with terminal logs:
+harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs
+
+# Multi-symptom saving logs to .txt:
+harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs debug.txt
+
+# Inspect session traversal logs anytime:
+harness logs <session_id> [--output debug.txt]
+
+# Compute blast radius for a symbol:
+harness blast-radius --repo ./my_project --node "fn:routes.py#compute_total#L15"
+
+# Deterministically index repository:
 harness index --repo ./my_project
-
-# Trace root cause candidates
-harness trace --repo ./my_project --symptom "fn:routes.py#compute_total"
-
-# Calculate blast radius & cross-boundary dependents
-harness blast-radius --repo ./my_project --node "fn:routes.py#compute_total"
 ```
