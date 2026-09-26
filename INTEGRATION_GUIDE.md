@@ -64,7 +64,7 @@ AGY invokes:
 - `plan_id`: Unique identifier (e.g. `amp_8c41f92e`).
 - `target_node`: Exact function to edit (`fn:routes.py#compute_total`).
 - `locked_dependents`: All cross-boundary dependents that must be updated together (e.g. `client.js`, `models.py`).
-- `context_stack`: Field-level projected slices (< 1,500 tokens). AGY does not search the codebase or read whole files.
+- `context_stack`: Field-level projected slices. AGY does not search the codebase or read whole files.
 
 ### Phase 2: Sandbox Verification & Atomic Commit
 AGY writes the clean patch using its own model session and submits it:

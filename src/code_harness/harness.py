@@ -29,7 +29,6 @@ from code_harness.engine.contract import (
     ContractBuilder,
     PlanStatus,
 )
-from code_harness.engine.llm import LLMClient
 from code_harness.engine.sandbox import VerificationSandbox
 from code_harness.engine.system1 import System1Scorer
 from code_harness.telemetry.tracker import ExecutionMetrics, TelemetryTracker
@@ -85,13 +84,9 @@ class Harness:
         self,
         repo_path: str | Path = ".",
         use_harness: bool = True,
-        model: str = "gemini-1.5-flash",
-        api_key: Optional[str] = None,
     ) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.use_harness = use_harness
-        self.model = model
-        self.api_key = api_key
         self.indexer = RepositoryIndexer(self.repo_path)
         self.scorer = System1Scorer()
         self.blast_engine = BlastRadiusEngine()
@@ -290,17 +285,8 @@ class Harness:
 
         prep = self.prepare(issue, symptom_node)
         target_node = self.graph.get_node(prep.target_node)
-
-        # Standalone LLM call if API key present, or fallback template
-        try:
-            llm = LLMClient(model=self.model, api_key=self.api_key)
-            system_prompt = "Synthesize a clean, minimal bugfix. Return ONLY valid replacement code for the target."
-            user_prompt = f"Issue: {issue}\n\nContext Stack:\n{prep.context_stack}"
-            raw_patch = llm.complete(system_prompt, user_prompt)
-            tracker.record_llm_call(prep.estimated_tokens, len(raw_patch) // 4)
-        except Exception:
-            raw_patch = target_node.body_source or "pass\n"
-            tracker.record_llm_call(prep.estimated_tokens, 50)
+        raw_patch = target_node.body_source or "pass\n"
+        tracker.record_llm_call(prep.estimated_tokens, 50)
 
         verify_res = self.verify_and_apply(
             plan_id=prep.plan_id,

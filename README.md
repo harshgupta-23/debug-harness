@@ -34,24 +34,6 @@ harness fix --repo /path/to/project --issue "Fix NoneType error in calculate_tot
 
 ---
 
-## 🔑 Setting API Key & Model
-
-Set standard environment variables in your terminal or `.env`:
-```bash
-# For Gemini
-export GEMINI_API_KEY="AIza..."
-
-# Or for OpenAI / compatible providers
-export OPENAI_API_KEY="sk-..."
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-```
-Or specify the model on the fly:
-```bash
-harness fix --repo ./my_project --issue "Fix bug" --model "gemini-1.5-flash"
-```
-
----
-
 ## 🤖 Using Inside Antigravity (AGY) & Other Agents
 
 The harness uses an **Inversion-of-Control** protocol. **Zero extra API keys are needed** because AGY uses its own active model session to generate the code.
