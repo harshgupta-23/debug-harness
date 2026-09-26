@@ -23,7 +23,7 @@ Add to `~/.gemini/config/mcp_config.json`:
 }
 ```
 
-### Step 2: Enable the `/harness` Slash Command
+### Step 2: Enable the `/debug` Slash Command
 Copy [`skills/harness/SKILL.md`](skills/harness/SKILL.md) to your Antigravity skills directory:
 ```bash
 mkdir -p ~/.gemini/config/skills/harness
@@ -36,14 +36,14 @@ Restart or reload your agent window (`Ctrl+Shift+P` -> *Developer: Reload Window
 
 ## 💬 How to Use in Chat
 
-Once installed, use the `/harness` slash command directly in chat:
+Once installed, use the `/debug` slash command directly in chat:
 
 ```text
-/harness The analytics dashboard is showing wildly inflated revenue and order numbers.
+/debug The analytics dashboard is showing wildly inflated revenue and order numbers.
 ```
 
 ### What happens automatically:
-1. **Zero Guessing**: The `/harness` command instructs the agent to invoke the `harness_step` tool directly (no bash file searches).
+1. **Zero Guessing**: The `/debug` command instructs the agent to invoke the `harness_step` tool directly (no bash file searches).
 2. **Deterministic Traversal**: The agent receives only **1 function at a time** with its exact AST code and 1-hop callers/callees.
 3. **Sandbox Gate**: When all links finish, changes are verified in an in-memory test sandbox before touching disk.
 

@@ -1,6 +1,6 @@
 # Antigravity (AGY) Integration Guide
 
-Connect the **Deterministic Code-Graph Harness** to **Antigravity (AGY)** using the `/harness` slash command and MCP tool integration.
+Connect the **Deterministic Code-Graph Harness** to **Antigravity (AGY)** using the `/debug` slash command and MCP tool integration.
 
 ---
 
@@ -32,7 +32,7 @@ Connect the **Deterministic Code-Graph Harness** to **Antigravity (AGY)** using 
    ```
    *(Note: Using the full path to `uv` prevents PATH resolution errors in desktop GUI sessions).*
 
-### Step 2: Enable the `/harness` Slash Command
+### Step 2: Enable the `/debug` Slash Command
 Copy the bundled skill into your Antigravity skills directory:
 ```bash
 mkdir -p ~/.gemini/config/skills/harness
@@ -45,10 +45,10 @@ Reload your window (`Ctrl+Shift+P` -> *Developer: Reload Window*).
 
 ## 🚀 How to Use in Chat
 
-Type `/harness` followed by the problem description:
+Type `/debug` followed by the problem description:
 
 ```text
-/harness The analytics dashboard is showing wildly inflated revenue and order numbers.
+/debug The analytics dashboard is showing wildly inflated revenue and order numbers.
 ```
 
 ### Protocol Workflow

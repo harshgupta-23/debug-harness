@@ -1,11 +1,11 @@
 ---
-name: harness
-description: Deterministic code-graph debugging harness. Steps through bugs 1 node at a time with sandbox verification. Trigger with /harness.
+name: debug
+description: Deterministic code-graph debugging harness. Steps through bugs 1 node at a time with sandbox verification. Trigger with /debug.
 ---
 
 # Deterministic Debug Harness Workflow
 
-Triggered when the user invokes `/harness <bug description>` or asks to debug with the harness.
+Triggered when the user invokes `/debug <bug description>` or asks to debug with the harness.
 
 ## Rules of Engagement
 1. **NEVER search the filesystem for binaries** (DO NOT run `which debug-harness` or `find`).
