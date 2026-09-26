@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "debug-harness"
-version = "0.2.0"
+version = "0.1.0"
 description = "Deterministic Code-Graph Debugging & Mutation Harness for Antigravity (AGY)"
 readme = "README.md"
 requires-python = ">=3.11"

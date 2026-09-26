@@ -109,7 +109,7 @@ def run_stdio_mcp() -> None:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "code-harness-mcp", "version": "0.2.0"},
+                    "serverInfo": {"name": "code-harness-mcp", "version": "0.1.0"},
                 },
             }
             sys.stdout.write(json.dumps(resp) + "\n")
