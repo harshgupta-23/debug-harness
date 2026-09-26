@@ -1,92 +1,69 @@
-"""Harness Engine: Agent-native two-phase protocol and verification gate.
+"""Deterministic Code-Graph Stepper Harness.
 
-Protocol:
-1. prepare(issue, symptom):
-   Deterministic AST index -> System 1 edge ranker -> Blast radius locking -> Bounded Context Stack.
-   Returns the minimal context and locked atomic contract to the host agent (Zero API keys needed).
-
-2. verify_and_apply(plan_id, target_patch, dependent_patches, apply):
-   Verifies model-authored diff in an in-memory sandbox (overlay AST parse + targeted test run).
-   Only commits changes to disk if completely verified.
+Provides a sequential 1-node-at-a-time graph traversal protocol:
+- Focuses on 'curr' with exact AST code, file path, line range, and symbol name.
+- Provides immediate depth-1 upstream and downstream neighbors with the same fields.
+- Strictly restricts edits to ONLY 'curr'.
+- Queues marked dependent links sequentially until all links return False/0.
+- Verifies full atomic transaction in sandbox before applying to disk.
 """
 
 from __future__ import annotations
 
 import json
-import re
-import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from code_harness.core.graph import CodeGraph, NodeKind
+from code_harness.core.graph import CodeGraph, GraphNode, NodeKind
 from code_harness.core.indexer import RepositoryIndexer
-from code_harness.engine.blast_radius import BlastRadiusEngine, BlastRadiusReport
+from code_harness.engine.blast_radius import BlastRadiusEngine
 from code_harness.engine.contract import (
     AtomicMutationPlan,
+    BundledEdit,
     ChangeKind,
-    ContextStack,
-    ContractBuilder,
+    EditReason,
     PlanStatus,
 )
 from code_harness.engine.sandbox import VerificationSandbox
 from code_harness.engine.system1 import System1Scorer
-from code_harness.telemetry.tracker import ExecutionMetrics, TelemetryTracker
 
 
-class LockedDependentInfo(BaseModel):
+class NodeSlice(BaseModel):
     node_id: str
     file_path: str
+    start_line: int
+    end_line: int
+    name: str
     kind: str
-    description: str
+    code: str
+    direction: Optional[str] = None      # "current", "upstream", "downstream"
+    relationship: Optional[str] = None   # "Calls", "ReadsColumn", "ConsumesRoute", etc.
 
 
-class PrepareResult(BaseModel):
-    plan_id: str
-    target_node: str
-    target_file: str
-    locked_dependents: List[LockedDependentInfo] = Field(default_factory=list)
-    context_stack: str
-    instructions: str
-    estimated_tokens: int
-
-
-class VerifyResult(BaseModel):
-    plan_id: str
-    passed: bool
-    status: str
-    applied: bool = False
-    stages_passed: List[str] = Field(default_factory=list)
-    diagnostics: List[str] = Field(default_factory=list)
-    touched_files: List[str] = Field(default_factory=list)
-
-
-class FixResult(BaseModel):
-    success: bool
-    issue: str
-    target_node: Optional[str] = None
-    plan_id: Optional[str] = None
-    verification_status: str
+class StepState(BaseModel):
+    session_id: str
+    curr: Optional[NodeSlice] = None
+    dependents_depth_1: List[NodeSlice] = Field(default_factory=list)
+    pending_queue: List[str] = Field(default_factory=list)
+    visited_nodes: List[str] = Field(default_factory=list)
+    done: bool = False
+    verification_status: str = "IN_PROGRESS"
     applied: bool = False
     touched_files: List[str] = Field(default_factory=list)
-    patch_summary: str = ""
-    metrics: ExecutionMetrics
     diagnostics: List[str] = Field(default_factory=list)
+    instructions: str = ""
 
 
 class Harness:
-    """Agent-native harness engine."""
+    """Graph stepper engine driving 1-node-at-a-time traversal and sandbox gating."""
 
-    # Active plan cache across MCP invocations
-    _active_plans: Dict[str, Dict[str, Any]] = {}
+    # Active session state: session_id -> dict
+    _sessions: Dict[str, Dict[str, Any]] = {}
 
-    def __init__(
-        self,
-        repo_path: str | Path = ".",
-        use_harness: bool = True,
-    ) -> None:
+    def __init__(self, repo_path: str | Path = ".") -> None:
         self.repo_path = Path(repo_path).resolve()
-        self.use_harness = use_harness
         self.indexer = RepositoryIndexer(self.repo_path)
         self.scorer = System1Scorer()
         self.blast_engine = BlastRadiusEngine()
@@ -98,158 +75,218 @@ class Harness:
             self.graph = self.indexer.index()
         return self.graph
 
-    # -------------------------------------------------------------------------
-    # Phase 1: Prepare Context & Lock Contract (Zero API keys needed!)
-    # -------------------------------------------------------------------------
-
-    def prepare(
+    def step(
         self,
-        issue: str,
-        symptom_node: Optional[str] = None,
-    ) -> PrepareResult:
-        """Deterministically index graph, lock cross-boundary dependents, and return ContextStack."""
+        session_id: Optional[str] = None,
+        issue: Optional[str] = None,
+        symptom: Optional[str] = None,
+        curr_patch: Optional[str] = None,
+        modify_next_nodes: Optional[List[str]] = None,
+        apply: bool = True,
+    ) -> StepState:
+        """Advance one node in the code graph or initialize a new session."""
         graph = self.ensure_indexed()
 
-        # 1. Resolve Target Function via System 1
-        target_id = symptom_node
-        if not target_id or not graph.has_node(target_id):
-            candidates = [(n, None, []) for n in graph.find_nodes_by_kind(NodeKind.FUNCTION)]
-            ranked = self.scorer.score_candidates(issue, candidates)
-            target_id = ranked[0].node.id if ranked else None
+        # -------------------------------------------------------------
+        # 1. Initialize New Session
+        # -------------------------------------------------------------
+        session_data = self._load_session(session_id) if session_id else None
+        if not session_data:
+            sess_id = session_id or f"step_{uuid.uuid4().hex[:8]}"
 
-        if not target_id:
-            raise ValueError(f"Could not resolve any target function in repository for issue: '{issue}'")
+            # Resolve starting target node
+            target_id = symptom
+            if not target_id or not graph.has_node(target_id):
+                candidates = [(n, None, []) for n in graph.find_nodes_by_kind(NodeKind.FUNCTION)]
+                ranked = self.scorer.score_candidates(issue or "error", candidates)
+                target_id = ranked[0].node.id if ranked else None
 
-        target_node = graph.get_node(target_id)
-        if not target_node:
-            raise KeyError(f"Target node '{target_id}' not found.")
-
-        # 2. Compute Blast Radius & Cross-Boundary Dependents
-        blast_report = self.blast_engine.compute_blast_radius(graph, target_id)
-
-        # 3. Assemble Bounded Context Stack
-        stack = ContextStack(total_token_budget=2000)
-        stack.push_frame(target_node, score=1.0)
-        for dep in blast_report.cross_boundary_dependents:
-            stack.push_frame(dep.node, score=0.8)
-
-        # 4. Draft Atomic Mutation Plan
-        plan = ContractBuilder.build_plan(
-            graph=graph,
-            blast_report=blast_report,
-            change_kind=ChangeKind.SEMANTIC_CHANGE,
-            target_patch="",
-        )
-
-        # Save to memory cache & disk cache for verification phase
-        plan_data = {
-            "plan": plan,
-            "blast_report": blast_report,
-            "repo_path": str(self.repo_path),
-        }
-        self._save_plan(plan.plan_id, plan_data)
-
-        # Formulate locked dependents list
-        locked_list = []
-        for dep in blast_report.cross_boundary_dependents:
-            locked_list.append(
-                LockedDependentInfo(
-                    node_id=dep.node.id,
-                    file_path=dep.node.file_path,
-                    kind=dep.kind,
-                    description=f"{dep.kind}: {dep.node.name}",
+            if not target_id or not graph.has_node(target_id):
+                return StepState(
+                    session_id=sess_id,
+                    done=True,
+                    verification_status="FAILED",
+                    diagnostics=[f"Could not resolve starting symbol for issue: '{issue}'"],
                 )
-            )
+
+            session_data = {
+                "session_id": sess_id,
+                "repo_path": str(self.repo_path),
+                "curr_id": target_id,
+                "pending_queue": [],
+                "visited_nodes": [target_id],
+                "patches": {},  # node_id -> patch_code
+                "apply": apply,
+            }
+            self._save_session(sess_id, session_data)
+            return self._build_step_state(sess_id, session_data, graph)
+
+        # -------------------------------------------------------------
+        # 2. Advance Existing Session
+        # -------------------------------------------------------------
+        session_data = self._load_session(session_id)
+        curr_id = session_data["curr_id"]
+        pending_queue: List[str] = session_data.get("pending_queue", [])
+        visited: List[str] = session_data.get("visited_nodes", [])
+        patches: Dict[str, str] = session_data.get("patches", {})
+
+        # Record patch for curr (strict enforcement: only curr is recorded)
+        if curr_patch and curr_patch.strip():
+            patches[curr_id] = self._extract_clean_code(curr_patch)
+
+        # Queue marked neighbors to modify next (if not already visited or queued)
+        for next_id in (modify_next_nodes or []):
+            if graph.has_node(next_id) and next_id not in visited and next_id not in pending_queue:
+                pending_queue.append(next_id)
+
+        # -------------------------------------------------------------
+        # 3. Step to Next Node or Complete
+        # -------------------------------------------------------------
+        if pending_queue:
+            # Advance to next link sequentially
+            next_curr_id = pending_queue.pop(0)
+            visited.append(next_curr_id)
+            session_data["curr_id"] = next_curr_id
+            session_data["pending_queue"] = pending_queue
+            session_data["visited_nodes"] = visited
+            session_data["patches"] = patches
+            self._save_session(session_id, session_data)
+            return self._build_step_state(session_id, session_data, graph)
+
+        # All links processed (queue is empty) -> Verify and Apply
+        session_data["pending_queue"] = []
+        session_data["patches"] = patches
+        return self._finish_session(session_id, session_data, graph, apply)
+
+    # -----------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------
+
+    def _build_step_state(
+        self,
+        session_id: str,
+        session_data: Dict[str, Any],
+        graph: CodeGraph,
+    ) -> StepState:
+        curr_id = session_data["curr_id"]
+        curr_node = graph.get_node(curr_id)
+        if not curr_node:
+            raise KeyError(f"Node '{curr_id}' not found in graph.")
+
+        curr_slice = self._slice_node(curr_node, direction="current")
+
+        # Gather depth-1 upstream (callers, readers) and downstream (callees, endpoints)
+        neighbors: List[NodeSlice] = []
+        seen = {curr_id}
+
+        # Upstream: predecessors in graph
+        for pred, edge in graph.predecessors(curr_id):
+            if pred.id not in seen:
+                seen.add(pred.id)
+                neighbors.append(self._slice_node(pred, direction="upstream", relationship=edge.kind.value))
+
+        # Downstream: successors in graph
+        for succ, edge in graph.successors(curr_id):
+            if succ.id not in seen:
+                seen.add(succ.id)
+                neighbors.append(self._slice_node(succ, direction="downstream", relationship=edge.kind.value))
+
+        # If endpoint, add consumers
+        if curr_node.kind == NodeKind.ENDPOINT:
+            for pred, edge in graph.predecessors(curr_id):
+                if pred.id not in seen:
+                    seen.add(pred.id)
+                    neighbors.append(self._slice_node(pred, direction="upstream", relationship="ConsumesRoute"))
 
         instructions = (
-            f"Atomic Contract Locked: You must provide replacement code for '{target_node.name}' "
-            f"in '{target_node.file_path}'. If any locked dependents need updates to match this change, "
-            f"include them. Then call harness_verify_and_apply(plan_id='{plan.plan_id}', target_patch=...)."
+            f"YOU ARE STRICTLY RESTRICTED TO MODIFY ONLY 'curr' ({curr_slice.name} in {curr_slice.file_path}, "
+            f"lines {curr_slice.start_line}-{curr_slice.end_line}). Do not output edits for any other node. "
+            f"In your response, provide 'curr_patch' for 'curr', and inspect the depth-1 dependents. "
+            f"If any dependent needs to be modified next, return its node_id in 'modify_next_nodes'. "
+            f"When no more dependents need modification, return an empty list."
         )
 
-        return PrepareResult(
-            plan_id=plan.plan_id,
-            target_node=target_id,
-            target_file=target_node.file_path,
-            locked_dependents=locked_list,
-            context_stack=stack.render_context(),
+        return StepState(
+            session_id=session_id,
+            curr=curr_slice,
+            dependents_depth_1=neighbors,
+            pending_queue=session_data.get("pending_queue", []),
+            visited_nodes=session_data.get("visited_nodes", []),
+            done=False,
+            verification_status="IN_PROGRESS",
             instructions=instructions,
-            estimated_tokens=stack.current_tokens(),
         )
 
-    @classmethod
-    def _save_plan(cls, plan_id: str, data: Dict[str, Any]) -> None:
-        cls._active_plans[plan_id] = data
-        try:
-            cache_dir = Path.home() / ".cache" / "debug-harness" / "plans"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            plan_file = cache_dir / f"{plan_id}.json"
-            plan_file.write_text(
-                json.dumps({
-                    "plan": data["plan"].model_dump(),
-                    "blast_report": data["blast_report"].model_dump(),
-                    "repo_path": data["repo_path"],
-                }),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-    @classmethod
-    def _load_plan(cls, plan_id: str) -> Optional[Dict[str, Any]]:
-        if plan_id in cls._active_plans:
-            return cls._active_plans[plan_id]
-        try:
-            cache_file = Path.home() / ".cache" / "debug-harness" / "plans" / f"{plan_id}.json"
-            if cache_file.exists():
-                raw = json.loads(cache_file.read_text(encoding="utf-8"))
-                plan = AtomicMutationPlan(**raw["plan"])
-                blast_report = BlastRadiusReport(**raw["blast_report"])
-                data = {
-                    "plan": plan,
-                    "blast_report": blast_report,
-                    "repo_path": raw["repo_path"],
-                }
-                cls._active_plans[plan_id] = data
-                return data
-        except Exception:
-            pass
-        return None
-
-    # -------------------------------------------------------------------------
-    # Phase 2: Verify & Apply (Sandbox Gate)
-    # -------------------------------------------------------------------------
-
-    def verify_and_apply(
+    def _slice_node(
         self,
-        plan_id: str,
-        target_patch: str,
-        dependent_patches: Optional[Dict[str, str]] = None,
-        apply: bool = True,
-    ) -> VerifyResult:
-        """Verify the model's patch in the sandbox and optionally apply to disk."""
-        plan_data = self._load_plan(plan_id)
-        if not plan_data:
-            raise KeyError(f"Plan ID '{plan_id}' not found or session expired. Run harness_prepare first.")
+        node: GraphNode,
+        direction: str = "current",
+        relationship: Optional[str] = None,
+    ) -> NodeSlice:
+        """Extract exact AST-bounded code text from file."""
+        code_text = node.body_source or ""
+        file_path = self.repo_path / node.file_path
 
-        graph = self.ensure_indexed()
-        blast_report: BlastRadiusReport = plan_data["blast_report"]
+        if file_path.exists():
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+                start = max(0, node.span.start_line - 1)
+                end = min(len(lines), node.span.end_line)
+                code_text = "\n".join(lines[start:end])
+            except Exception:
+                pass
 
-        # Clean code fences if present
-        clean_patch = self._extract_clean_code(target_patch)
+        if not code_text.strip():
+            code_text = node.canonical_signature()
 
-        # Rebuild plan with actual patch content
-        plan = ContractBuilder.build_plan(
-            graph=graph,
-            blast_report=blast_report,
-            change_kind=ChangeKind.SEMANTIC_CHANGE,
-            target_patch=clean_patch,
-            dependent_patches=dependent_patches,
+        return NodeSlice(
+            node_id=node.id,
+            file_path=node.file_path,
+            start_line=node.span.start_line,
+            end_line=node.span.end_line,
+            name=node.name,
+            kind=node.kind.value,
+            code=code_text,
+            direction=direction,
+            relationship=relationship,
         )
 
-        # Verification Sandbox (Stage 1: Overlay, Stage 2: AST, Stage 3: Tests)
-        verification = self.sandbox.verify_plan(plan, graph)
+    def _finish_session(
+        self,
+        session_id: str,
+        session_data: Dict[str, Any],
+        graph: CodeGraph,
+        apply: bool,
+    ) -> StepState:
+        """Construct atomic mutation plan from all stepped patches and verify in sandbox."""
+        patches: Dict[str, str] = session_data.get("patches", {})
+        visited: List[str] = session_data.get("visited_nodes", [])
+        primary_id = visited[0] if visited else list(patches.keys())[0]
 
+        bundled: List[BundledEdit] = []
+        for node_id, patch_code in patches.items():
+            node = graph.get_node(node_id)
+            if node:
+                bundled.append(
+                    BundledEdit(
+                        node_id=node.id,
+                        file_path=node.file_path,
+                        edit_span=node.span,
+                        patch=patch_code,
+                        reason=EditReason.TARGET_DEFINITION if node_id == primary_id else EditReason.CROSS_BOUNDARY_CONSUMER,
+                        description=f"Stepped mutation for {node.name}",
+                    )
+                )
+
+        plan = AtomicMutationPlan(
+            graph_epoch=graph.graph_epoch,
+            target_node=primary_id,
+            change_kind=ChangeKind.SEMANTIC_CHANGE,
+            bundled_edits=bundled,
+            policy_applied=self.blast_engine.compute_blast_radius(graph, primary_id).policy,
+        )
+
+        verification = self.sandbox.verify_plan(plan, graph)
         applied = False
         if verification.passed and apply:
             self._apply_plan_to_disk(plan)
@@ -257,78 +294,17 @@ class Harness:
 
         touched = list({e.file_path for e in plan.bundled_edits if e.patch.strip()})
 
-        return VerifyResult(
-            plan_id=plan_id,
-            passed=verification.passed,
-            status=plan.status.value,
+        return StepState(
+            session_id=session_id,
+            done=True,
+            verification_status=plan.status.value,
             applied=applied,
-            stages_passed=verification.stages_passed,
-            diagnostics=verification.diagnostics,
             touched_files=touched,
-        )
-
-    # -------------------------------------------------------------------------
-    # Standalone One-Shot Fix (Terminal use)
-    # -------------------------------------------------------------------------
-
-    def fix(
-        self,
-        issue: str,
-        apply: bool = False,
-        symptom_node: Optional[str] = None,
-    ) -> FixResult:
-        """One-shot fix for terminal execution."""
-        tracker = TelemetryTracker(mode_name="Harness" if self.use_harness else "Baseline")
-
-        if not self.use_harness:
-            return self._fix_baseline(issue, apply, tracker)
-
-        prep = self.prepare(issue, symptom_node)
-        target_node = self.graph.get_node(prep.target_node)
-        raw_patch = target_node.body_source or "pass\n"
-        tracker.record_llm_call(prep.estimated_tokens, 50)
-
-        verify_res = self.verify_and_apply(
-            plan_id=prep.plan_id,
-            target_patch=raw_patch,
-            apply=apply,
-        )
-
-        tracker.record_verification(verify_res.status)
-        tracker.record_dependents(len(prep.locked_dependents) + 1, len(prep.locked_dependents) + 1)
-        metrics = tracker.stop()
-
-        return FixResult(
-            success=verify_res.passed,
-            issue=issue,
-            target_node=prep.target_node,
-            plan_id=prep.plan_id,
-            verification_status=verify_res.status,
-            applied=verify_res.applied,
-            touched_files=verify_res.touched_files,
-            patch_summary=raw_patch[:200],
-            metrics=metrics,
-            diagnostics=verify_res.diagnostics,
-        )
-
-    def _fix_baseline(self, issue: str, apply: bool, tracker: TelemetryTracker) -> FixResult:
-        py_files = list(self.repo_path.glob("*.py"))
-        raw_context = "\n".join(f"=== {f.name} ===\n{f.read_text(encoding='utf-8')[:2000]}" for f in py_files[:3])
-        input_tokens = len(raw_context) // 4
-        tracker.record_llm_call(input_tokens, 50)
-        tracker.record_verification("UNVERIFIED (No Sandbox)")
-        metrics = tracker.stop()
-        return FixResult(
-            success=False,
-            issue=issue,
-            verification_status="UNVERIFIED (No Sandbox)",
-            applied=False,
-            metrics=metrics,
-            diagnostics=["Baseline mode bypassed deterministic parser and verification sandbox."],
+            diagnostics=verification.diagnostics,
+            instructions="All requested links processed. Verification sandbox complete.",
         )
 
     def _apply_plan_to_disk(self, plan: AtomicMutationPlan) -> None:
-        """Write verified edits to disk."""
         edits_by_file: Dict[str, List[Any]] = {}
         for edit in plan.bundled_edits:
             edits_by_file.setdefault(edit.file_path, []).append(edit)
@@ -340,17 +316,39 @@ class Harness:
                 sorted_edits = sorted(edits, key=lambda e: e.edit_span.start_line, reverse=True)
                 for edit in sorted_edits:
                     patch_str = edit.patch.strip()
-                    if patch_str and not patch_str.startswith(("# [Harness", "// [Harness", "-- [Harness")):
+                    if patch_str and not patch_str.startswith(("# [Harness", "//", "--")):
                         start_idx = max(0, edit.edit_span.start_line - 1)
                         end_idx = min(len(lines), edit.edit_span.end_line)
                         lines = lines[:start_idx] + edit.patch.splitlines() + lines[end_idx:]
                 file_path.write_text("\n".join(lines), encoding="utf-8")
 
+    @classmethod
+    def _save_session(cls, sess_id: str, data: Dict[str, Any]) -> None:
+        cls._sessions[sess_id] = data
+        try:
+            cache_dir = Path.home() / ".cache" / "debug-harness" / "sessions"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{sess_id}.json").write_text(json.dumps(data), encoding="utf-8")
+        except Exception:
+            pass
+
+    @classmethod
+    def _load_session(cls, sess_id: str) -> Dict[str, Any]:
+        if sess_id in cls._sessions:
+            return cls._sessions[sess_id]
+        cache_file = Path.home() / ".cache" / "debug-harness" / "sessions" / f"{sess_id}.json"
+        if cache_file.exists():
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            cls._sessions[sess_id] = data
+            return data
+        return {}
+
     @staticmethod
     def _extract_clean_code(text: str) -> str:
         code = text.strip()
         if "```" in code:
-            match = re.search(r"```(?:python)?\s*(.*?)\s*```", code, re.DOTALL)
-            if match:
-                code = match.group(1)
+            import re
+            m = re.search(r"```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```", code, re.DOTALL)
+            if m:
+                code = m.group(1)
         return code

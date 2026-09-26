@@ -50,14 +50,18 @@ Add to your AGY MCP config (`~/.gemini/antigravity/mcp.json`):
 }
 ```
 
-### Two-Phase Agent Protocol
-1. **`harness_prepare(repo_path, issue)`**: Deterministically builds the call-graph, locks all cross-boundary dependents (DB ↔ Backend ↔ Frontend), and returns a bounded `<1,500` token Context Stack.
-2. **`harness_verify_and_apply(repo_path, plan_id, target_patch, apply)`**: Verification sandbox gate. Runs AST syntax validation and targeted `pytest` tests before committing edits to disk.
+### Stepper Agent Protocol (`harness_step`)
+- **`harness_step(repo_path, session_id, curr_patch, modify_next_nodes, apply)`**:
+  - Focuses on a single symbol `curr` with its exact AST code, file path, line numbers, and its depth-1 upstream/downstream neighbors.
+  - Strictly restricts AGY to patch ONLY `curr`.
+  - Queues chosen neighbor links sequentially until all links return False/0, then runs sandbox verification and commits to disk.
 
 ---
 
 ## 🛠️ Additional Commands
 ```bash
+# Step 1 node at a time through the code graph
+harness step --repo ./my_project --issue "Fix order discount null error"
 # Inspect graph nodes and edges
 harness index --repo ./my_project
 

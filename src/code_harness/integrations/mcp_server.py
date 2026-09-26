@@ -1,8 +1,8 @@
 """Standard Model Context Protocol (MCP) stdio server for AGY.
 
-Enforces zero-API-key Inversion of Control:
-1. harness_prepare: Provides deterministic ContextStack and locks Atomic Contract.
-2. harness_verify_and_apply: Runs sandbox verification gate on AGY's proposed patch.
+Provides the 1-node-at-a-time graph traversal stepper tool:
+- harness_step: inspects 'curr' + depth-1 upstream/downstream neighbors, enforces single-function edit boundary,
+  and steps along chosen links until all are resolved.
 """
 
 from __future__ import annotations
@@ -17,36 +17,34 @@ from code_harness.harness import Harness
 
 TOOLS = [
     {
-        "name": "harness_prepare",
-        "description": "Deterministically index repository, lock cross-boundary dependents, and return a bounded Context Stack for an issue. Zero extra API keys needed.",
+        "name": "harness_step",
+        "description": (
+            "Step through code graph 1 node at a time. Returns 'curr' (file, lines, symbol, exact AST code) "
+            "and depth-1 upstream/downstream dependents. STRICT RESTRICTION: You may only modify 'curr'. "
+            "Pass 'curr_patch' to edit curr, and pass 'modify_next_nodes' with neighbor IDs that need editing next. "
+            "Continues until no more nodes are queued."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repo_path": {"type": "string", "description": "Path to target repository folder."},
-                "issue": {"type": "string", "description": "Error message, test failure, or bug description."},
+                "session_id": {"type": "string", "description": "Session ID (omit on first call to start)."},
+                "issue": {"type": "string", "description": "Bug or problem description (used on first call)."},
                 "symptom": {"type": "string", "description": "Optional function name or file:line anchor."},
+                "curr_patch": {"type": "string", "description": "Replacement code for 'curr' ONLY."},
+                "modify_next_nodes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of neighbor node IDs that must be modified next.",
+                },
+                "apply": {"type": "boolean", "description": "Write verified changes to disk when done.", "default": True},
             },
-            "required": ["repo_path", "issue"],
-        },
-    },
-    {
-        "name": "harness_verify_and_apply",
-        "description": "Verification sandbox gate: test model-authored diff against AST syntax and graph-targeted tests before applying.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "repo_path": {"type": "string", "description": "Path to target repository folder."},
-                "plan_id": {"type": "string", "description": "Plan ID returned by harness_prepare."},
-                "target_patch": {"type": "string", "description": "Clean replacement code for the target function."},
-                "dependent_patches": {"type": "object", "description": "Optional mapping of dependent node ID to replacement code."},
-                "apply": {"type": "boolean", "description": "Write verified changes directly to files if passed.", "default": True},
-            },
-            "required": ["repo_path", "plan_id", "target_patch"],
+            "required": ["repo_path"],
         },
     },
     {
         "name": "harness_blast_radius",
-        "description": "Inspect reachability, cross-boundary dependents (DB ↔ Backend ↔ Frontend), and safety policy for any symbol.",
+        "description": "Inspect reachability and cross-boundary dependents for any symbol.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -58,8 +56,6 @@ TOOLS = [
     },
 ]
 
-
-# Persistent harness instances per repo
 _HARNESS_CACHE: Dict[str, Harness] = {}
 
 
@@ -97,21 +93,16 @@ def run_stdio_mcp() -> None:
                 repo_path = args.get("repo_path", ".")
                 harness = get_harness(repo_path)
 
-                if tool_name == "harness_prepare":
-                    res = harness.prepare(
-                        issue=args.get("issue", ""),
-                        symptom_node=args.get("symptom"),
-                    )
-                    content = res.model_dump_json(indent=2)
-
-                elif tool_name == "harness_verify_and_apply":
-                    res = harness.verify_and_apply(
-                        plan_id=args.get("plan_id", ""),
-                        target_patch=args.get("target_patch", ""),
-                        dependent_patches=args.get("dependent_patches"),
+                if tool_name == "harness_step":
+                    state = harness.step(
+                        session_id=args.get("session_id"),
+                        issue=args.get("issue"),
+                        symptom=args.get("symptom"),
+                        curr_patch=args.get("curr_patch"),
+                        modify_next_nodes=args.get("modify_next_nodes"),
                         apply=args.get("apply", True),
                     )
-                    content = res.model_dump_json(indent=2)
+                    content = state.model_dump_json(indent=2)
 
                 elif tool_name == "harness_blast_radius":
                     graph = harness.ensure_indexed()

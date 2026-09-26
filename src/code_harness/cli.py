@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -13,7 +13,6 @@ from rich.table import Table
 from code_harness.core.graph import NodeKind
 from code_harness.core.indexer import RepositoryIndexer
 from code_harness.engine.blast_radius import BlastRadiusEngine
-from code_harness.engine.system1 import System1Scorer
 from code_harness.harness import Harness
 from code_harness.integrations.mcp_server import run_stdio_mcp
 from code_harness.integrations.proxy import run_proxy_server
@@ -27,108 +26,87 @@ console = Console()
 
 
 @app.command()
-def prepare(
+def step(
     repo: str = typer.Option(".", "--repo", "-r", help="Path to target project"),
-    issue: str = typer.Option(..., "--issue", "-i", help="Error message or problem description"),
-    symptom: Optional[str] = typer.Option(None, "--symptom", "-s", help="Optional symptom node or file:line"),
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Existing session ID"),
+    issue: Optional[str] = typer.Option(None, "--issue", "-i", help="Issue description on start"),
+    symptom: Optional[str] = typer.Option(None, "--symptom", help="Initial function anchor"),
+    patch: Optional[str] = typer.Option(None, "--patch", "-p", help="Replacement code for 'curr' ONLY"),
+    next_node: Optional[List[str]] = typer.Option(None, "--next", "-n", help="Neighbor node ID(s) to modify next"),
+    apply: bool = typer.Option(True, "--apply/--no-apply", help="Apply to disk when all links finish"),
 ) -> None:
-    """Phase 1: Deterministically lock cross-boundary dependents and print ContextStack."""
+    """Step 1 node at a time through the code graph."""
     repo_path = Path(repo).resolve()
     harness = Harness(repo_path=repo_path)
-    prep = harness.prepare(issue=issue, symptom_node=symptom)
 
-    console.print(f"[bold cyan][*] Plan Prepared:[/bold cyan] {prep.plan_id}")
-    console.print(f"    Target: [bold]{prep.target_node}[/bold] in {prep.target_file}")
-    console.print(f"    Estimated Tokens: {prep.estimated_tokens}")
+    # Check if patch is file path
+    patch_text = patch
+    if patch and "\n" not in patch and len(patch) < 260:
+        try:
+            p = Path(patch)
+            if p.exists() and p.is_file():
+                patch_text = p.read_text(encoding="utf-8")
+        except OSError:
+            pass
 
-    if prep.locked_dependents:
-        table = Table(title="Locked Dependents (Mandatory Atomic Contract)")
-        table.add_column("Kind", style="cyan")
-        table.add_column("Node ID", style="bold")
-        table.add_column("File", style="dim")
-        for dep in prep.locked_dependents:
-            table.add_row(dep.kind, dep.node_id, dep.file_path)
+    state = harness.step(
+        session_id=session_id,
+        issue=issue,
+        symptom=symptom,
+        curr_patch=patch_text,
+        modify_next_nodes=next_node,
+        apply=apply,
+    )
+
+    console.print(f"[bold cyan][*] Session ID:[/bold cyan] {state.session_id}")
+    console.print(f"    Status: [bold]{state.verification_status}[/bold] (Done: {state.done})\n")
+
+    if state.done:
+        if state.verification_status == "SANDBOX_VERIFIED":
+            console.print("[bold green][✓] All requested links resolved and verified in sandbox![/bold green]")
+            if state.applied:
+                console.print(f"    Committed edits to: {state.touched_files}")
+        else:
+            console.print(f"[bold red][✗] Session Finished with Status: {state.verification_status}[/bold red]")
+            for d in state.diagnostics:
+                console.print(f"    • {d}")
+        return
+
+    # Display curr
+    if state.curr:
+        curr = state.curr
+        console.print(f"[bold green]▶ CURRENT FOCUS (Only this node can be modified):[/bold green]")
+        console.print(f"  • Symbol: [bold]{curr.name}[/bold] ({curr.kind})")
+        console.print(f"  • Location: {curr.file_path} (lines {curr.start_line}-{curr.end_line})")
+        console.print(f"  • Node ID: {curr.node_id}")
+        console.print(f"[dim]--- Exact AST Code Slice ---[/dim]\n{curr.code}\n[dim]----------------------------[/dim]\n")
+
+    # Display 1-hop dependents
+    if state.dependents_depth_1:
+        table = Table(title="Depth-1 Dependents (1-hop Upstream & Downstream)")
+        table.add_column("Direction", style="cyan")
+        table.add_column("Relationship", style="magenta")
+        table.add_column("Symbol", style="bold")
+        table.add_column("File:Lines", style="dim")
+        table.add_column("Node ID", style="yellow")
+
+        for dep in state.dependents_depth_1:
+            table.add_row(
+                dep.direction or "",
+                dep.relationship or "",
+                dep.name,
+                f"{dep.file_path}:{dep.start_line}-{dep.end_line}",
+                dep.node_id,
+            )
         console.print(table)
 
-    console.print(f"\n[bold]=== Context Stack ===[/bold]\n{prep.context_stack}\n")
-    console.print(f"[bold yellow]Instructions:[/bold yellow] {prep.instructions}")
-
-
-@app.command()
-def verify(
-    repo: str = typer.Option(".", "--repo", "-r", help="Path to target project"),
-    plan_id: str = typer.Option(..., "--plan-id", "-p", help="Plan ID from harness prepare"),
-    patch: str = typer.Option(..., "--patch", help="Replacement code or file path containing patch"),
-    apply: bool = typer.Option(True, "--apply/--no-apply", help="Commit verified diff to disk"),
-) -> None:
-    """Phase 2: Verify patch in sandbox and apply to disk."""
-    repo_path = Path(repo).resolve()
-    harness = Harness(repo_path=repo_path)
-
-    # Check if patch argument is a file path
-    patch_text = patch
-    p = Path(patch)
-    if p.exists() and p.is_file():
-        patch_text = p.read_text(encoding="utf-8")
-
-    res = harness.verify_and_apply(plan_id=plan_id, target_patch=patch_text, apply=apply)
-    if res.passed:
-        console.print(f"[bold green][✓] Sandbox Verification Passed! Status: {res.status}[/bold green]")
-        if res.applied:
-            console.print(f"    Applied changes to: {res.touched_files}")
-    else:
-        console.print(f"[bold red][✗] Verification Failed! Status: {res.status}[/bold red]")
-        for d in res.diagnostics:
-            console.print(f"    • {d}")
-
-
-@app.command()
-def fix(
-    repo: str = typer.Option(".", "--repo", "-r", help="Path to project directory to fix"),
-    issue: str = typer.Option(..., "--issue", "-i", help="Description of the bug or problem"),
-    apply: bool = typer.Option(False, "--apply", "-a", help="Write verified patch to disk"),
-    use_harness: bool = typer.Option(
-        True,
-        "--harness/--no-harness",
-        help="Toggle deterministic graph parser & contract on or off",
-    ),
-    symptom: Optional[str] = typer.Option(None, "--symptom", "-s", help="Optional symptom node or file:line"),
-) -> None:
-    """One-shot fix for terminal execution."""
-    repo_path = Path(repo).resolve()
-    mode_label = "Harness (Deterministic Graph)" if use_harness else "Baseline (Raw Context)"
-    console.print(f"[bold cyan][*] Running Fix on:[/bold cyan] {repo_path}")
-    console.print(f"    Mode: [bold yellow]{mode_label}[/bold yellow]")
-    console.print(f"    Issue: {issue}\n")
-
-    harness = Harness(repo_path=repo_path, use_harness=use_harness)
-    result = harness.fix(issue=issue, apply=apply, symptom_node=symptom)
-
-    if result.success:
-        console.print(f"[bold green][✓] Fix Verified Successfully! Status: {result.verification_status}[/bold green]")
-    else:
-        console.print(f"[bold yellow][!] Status: {result.verification_status}[/bold yellow]")
-
-    if result.applied:
-        console.print(f"[bold green]    Edits committed to disk for {len(result.touched_files)} files.[/bold green]")
-    elif result.success and not apply:
-        console.print("    (Run with --apply to commit verified patch to disk)")
-
-    # Telemetry summary
-    table = Table(title="Execution Telemetry")
-    table.add_column("Parameter", style="cyan")
-    table.add_column("Value", style="magenta")
-    table.add_row("Input Tokens", f"{result.metrics.input_tokens:,}")
-    table.add_row("Output Tokens", f"{result.metrics.output_tokens:,}")
-    table.add_row("Total Tokens", f"{result.metrics.total_tokens:,}")
-    table.add_row("Execution Time", f"{result.metrics.wall_clock_seconds:.2f}s")
-    table.add_row("Verification Gate", result.verification_status)
-    console.print(table)
+    if state.pending_queue:
+        console.print(f"\n[yellow]Remaining Queued Nodes:[/yellow] {state.pending_queue}")
 
 
 @app.command()
 def mcp() -> None:
-    """Run standard Model Context Protocol (MCP) stdio server for AGY, Cursor, Claude."""
+    """Run standard Model Context Protocol (MCP) stdio server for AGY."""
     run_stdio_mcp()
 
 
