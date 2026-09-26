@@ -1,137 +1,70 @@
 # Antigravity (AGY) Integration Guide
 
-Integrate the **Deterministic Code-Graph Harness** directly into **Antigravity (AGY)** as an MCP server directly from GitHub.
-
-**Zero Extra API Keys Required**: The harness extracts deterministic AST code slices, prunes context, and enforces sandbox gates, while AGY synthesizes patches using its existing active model session.
+Connect the **Deterministic Code-Graph Harness** to **Antigravity (AGY)** using the `/harness` slash command and MCP tool integration.
 
 ---
 
-## 1. Quick Install via GitHub
+## 🛠️ Setup Guide (2 Steps)
 
-Run ephemerally with `uvx`:
+### Step 1: Add to Global MCP Configuration
+1. In your terminal, check the absolute path to `uv`:
+   ```bash
+   which uv
+   # Example output: /home/hp/.local/bin/uv
+   ```
 
+2. Add this configuration to [`~/.gemini/config/mcp_config.json`](file:///home/hp/.gemini/config/mcp_config.json):
+   ```json
+   {
+     "mcpServers": {
+       "debug-harness": {
+         "command": "/home/hp/.local/bin/uv",
+         "args": [
+           "run",
+           "--directory",
+           "/home/hp/projects/debug-harness",
+           "harness",
+           "mcp"
+         ]
+       }
+     }
+   }
+   ```
+   *(Note: Using the full path to `uv` prevents PATH resolution errors in desktop GUI sessions).*
+
+### Step 2: Enable the `/harness` Slash Command
+Copy the bundled skill into your Antigravity skills directory:
 ```bash
-uvx --from git+https://github.com/harshgupta-23/debug-harness.git harness --help
+mkdir -p ~/.gemini/config/skills/harness
+cp skills/harness/SKILL.md ~/.gemini/config/skills/harness/SKILL.md
 ```
 
-Or install globally:
+Reload your window (`Ctrl+Shift+P` -> *Developer: Reload Window*).
 
+---
+
+## 🚀 How to Use in Chat
+
+Type `/harness` followed by the problem description:
+
+```text
+/harness The analytics dashboard is showing wildly inflated revenue and order numbers.
+```
+
+### Protocol Workflow
+1. **Symbol Mapping**: The agent calls `harness_outline` or directly passes the symptoms to `harness_step`.
+2. **Shared Root or Disjoint Queue**:
+   - If symptoms share a common dependency, the harness collapses them to the shared root function.
+   - If independent, the harness queues them sequentially.
+3. **Strict 1-Node Boundary**: The agent receives ONLY the current focused function (`curr`) and its 1-hop upstream/downstream neighbors. It outputs a patch for `curr` and marks any neighbor to modify next.
+4. **Sandbox Gate**: Once all links return empty, the harness executes tests in an in-memory AST sandbox and commits the verified patch to disk.
+
+---
+
+## 🔍 Verifying the MCP Server
+
+Test that your MCP server responds over stdio:
 ```bash
-uv tool install git+https://github.com/harshgupta-23/debug-harness.git
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | uv run --directory /home/hp/projects/debug-harness harness mcp
 ```
-
----
-
-## 2. AGY MCP Configuration
-
-Add to your Antigravity MCP configuration (`~/.gemini/antigravity/mcp.json` or workspace MCP settings):
-
-```json
-{
-  "mcpServers": {
-    "debug-harness": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/harshgupta-23/debug-harness.git",
-        "harness",
-        "mcp"
-      ]
-    }
-  }
-}
-```
-
----
-
-## 3. Workflow: How AGY Interacts with the Harness
-
-### Step 0: Inspect Symbol Outline (Optional)
-When AGY needs to map user complaints to exact codebase symbols:
-```json
-// Tool: harness_outline
-{
-  "repo_path": "/path/to/project"
-}
-```
-Returns a compact mapping of files to functions, classes, and routes.
-
----
-
-### Step 1: Initialize Session with 1..N Symptoms
-AGY can pass a single issue or multiple symptom symbols reported by the user:
-
-```json
-// Tool: harness_step
-{
-  "repo_path": "/path/to/project",
-  "issue": "Prices mismatch and checkout validation fails",
-  "symptoms": ["get_order_details", "checkout_route"]
-}
-```
-
-**Harness Resolution:**
-* **Shared Root Cause**: Computes $\bigcap \text{Upstream/Downstream}$. If symptoms share a dependency (e.g., `compute_total`), the harness collapses them and sets `curr` to the common root cause.
-* **Disjoint Bugs**: If symptoms have no shared paths, sets `curr` to the first symptom and queues the remaining symptoms in `pending_queue`.
-
-**Harness returns:**
-* `curr`:
-  * `name`: `compute_total`
-  * `file_path`: `routes.py`
-  * `start_line`: 15, `end_line`: 19
-  * `code`: Exact AST function slice
-* `dependents_depth_1`: 1-hop upstream (callers) and downstream (callees/endpoints) nodes with exact slices.
-* `instructions`: *"Strictly restricted to edit ONLY 'curr'. Provide curr_patch, and specify which dependents need modification next in modify_next_nodes."*
-
----
-
-### Step 2: Patch `curr` & Choose Next Link
-AGY returns:
-```json
-// Tool: harness_step
-{
-  "repo_path": "/path/to/project",
-  "session_id": "step_8f075d95",
-  "curr_patch": "def compute_total(base_amount: float, discount_rate: float | None = None) -> float:\n    ...",
-  "modify_next_nodes": ["fn:routes.py#get_order_details#L23"]
-}
-```
-
-* The harness records the patch for `curr`.
-* Focus shifts to `get_order_details`, loading its AST slice and *its* 1-hop neighborhood.
-
----
-
-### Step 3: Complete Traversal & Verify
-When all required nodes have been stepped and patched:
-```json
-// Tool: harness_step
-{
-  "repo_path": "/path/to/project",
-  "session_id": "step_8f075d95",
-  "curr_patch": "def get_order_details(order_id: int) -> dict:\n    ...",
-  "modify_next_nodes": [],
-  "apply": true
-}
-```
-
-* Harness executes multi-stage sandbox verification (in-memory AST overlay + targeted pytest execution).
-* If verified, commits all changes atomically to disk.
-* Returns `done: true`, `verification_status: "SANDBOX_VERIFIED"`.
-
----
-
-## 4. CLI Traversal Logs
-
-Inspect the entire trajectory of bugs, starting nodes, and step-by-step traversal:
-
-```bash
-# Dump traversal log to terminal:
-harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs
-
-# Save traversal log to a text file:
-harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs traversal.txt
-
-# View logs for any past session:
-harness logs <session_id> [--output traversal.txt]
-```
+You will see JSON listing `harness_step`, `harness_outline`, and `harness_blast_radius`.

@@ -2,93 +2,67 @@
 
 [![Repository](https://img.shields.io/badge/GitHub-harshgupta--23%2Fdebug--harness-blue)](https://github.com/harshgupta-23/debug-harness)
 
-A zero-API-key developer engine and CLI that maps codebases into typed AST dependency graphs, resolves single or multi-symptom bug entry points, enforces single-function edit boundaries, and gatekeeps code changes through sandbox verification.
+A zero-API-key developer harness that maps codebases into typed AST dependency graphs, resolves bug entry points, enforces single-function edit boundaries, and gatekeeps code changes with sandbox verification.
 
 ---
 
-## ⚡ Quickstart
+## ⚡ 2-Step Setup for Antigravity (AGY)
 
-```bash
-# Direct install from GitHub:
-uv tool install git+https://github.com/harshgupta-23/debug-harness.git
+### Step 1: Register the MCP Server
+Find your `uv` path by running `which uv` in your terminal (e.g. `/home/user/.local/bin/uv`).
 
-# Or install locally in development:
-uv pip install -e .
-
-# 1. View codebase outline to find symbol anchors:
-harness outline --repo ./my_project
-
-# 2. Step 1 node at a time through the code graph:
-harness step --repo ./my_project --issue "Fix order discount calculation" --symptom compute_total
-
-# 3. Handle multiple glitches at once with traversal logging:
-harness step --repo ./my_project --symptoms checkout_route --symptoms cart_total --logs run_log.txt
-```
-
----
-
-## 🤖 Using Inside Antigravity (AGY) & MCP Agents
-
-The harness uses an **Inversion-of-Control** protocol. **Zero extra API keys or third-party models are needed** because AGY synthesizes code directly using its own active model connection.
-
-Add to your AGY MCP config (`~/.gemini/antigravity/mcp.json`):
+Add to `~/.gemini/config/mcp_config.json`:
 ```json
 {
   "mcpServers": {
     "debug-harness": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/harshgupta-23/debug-harness.git", "harness", "mcp"]
+      "command": "/path/to/your/uv",
+      "args": ["run", "--directory", "/path/to/debug-harness", "harness", "mcp"]
     }
   }
 }
 ```
 
-### Exposed MCP Tools
+### Step 2: Enable the `/harness` Slash Command
+Copy [`skills/harness/SKILL.md`](skills/harness/SKILL.md) to your Antigravity skills directory:
+```bash
+mkdir -p ~/.gemini/config/skills/harness
+cp skills/harness/SKILL.md ~/.gemini/config/skills/harness/SKILL.md
+```
 
-1. **`harness_outline`**:
-   - `repo_path`: Path to target repository.
-   - Returns a compact JSON map of all files and their top-level symbols (functions, classes, endpoints, line ranges).
-   
-2. **`harness_step`**:
-   - `repo_path`: Path to target repository.
-   - `session_id`: Omit on first call to initialize; provide on subsequent calls.
-   - `issue`: Problem or bug description.
-   - `symptom`: Optional single function or anchor name.
-   - `symptoms`: Optional list of multiple symptom symbol names.
-     - **Shared Root**: If symptoms share common upstream callers or downstream callees, collapses to 1 shared root cause.
-     - **Disjoint**: If symptoms are independent, queues them sequentially.
-   - `curr_patch`: Replacement code for `curr` ONLY (**Strict Restriction**).
-   - `modify_next_nodes`: List of depth-1 neighbor node IDs that need editing next.
-   - `apply`: Verify in sandbox and write to disk when all links return empty (`default: true`).
-
-3. **`harness_blast_radius`**:
-   - `repo_path`: Path to target repository.
-   - `node_id`: Target symbol ID.
-   - Returns reachability analysis and cross-boundary safety policies.
+Restart or reload your agent window (`Ctrl+Shift+P` -> *Developer: Reload Window*).
 
 ---
 
-## 🛠️ CLI Reference
+## 💬 How to Use in Chat
+
+Once installed, use the `/harness` slash command directly in chat:
+
+```text
+/harness The analytics dashboard is showing wildly inflated revenue and order numbers.
+```
+
+### What happens automatically:
+1. **Zero Guessing**: The `/harness` command instructs the agent to invoke the `harness_step` tool directly (no bash file searches).
+2. **Deterministic Traversal**: The agent receives only **1 function at a time** with its exact AST code and 1-hop callers/callees.
+3. **Sandbox Gate**: When all links finish, changes are verified in an in-memory test sandbox before touching disk.
+
+---
+
+## 💻 Terminal CLI Usage (Optional)
+
+If you prefer running from the command line:
 
 ```bash
-# Display compact symbol outline:
+# View symbol outline to find function/route names:
 harness outline --repo ./my_project
 
-# Single-symptom step session:
-harness step --repo ./my_project --symptom compute_total
+# Step through a bug with terminal logs:
+harness step --repo ./my_project --symptom compute_total --logs
 
-# Multi-symptom with terminal logs:
-harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs
+# Handle multiple glitches at once:
+harness step --repo ./my_project --symptoms checkout_route --symptoms cart_total --logs run_log.txt
 
-# Multi-symptom saving logs to .txt:
-harness step --repo ./my_project --symptoms route_a --symptoms route_b --logs debug.txt
-
-# Inspect session traversal logs anytime:
-harness logs <session_id> [--output debug.txt]
-
-# Compute blast radius for a symbol:
-harness blast-radius --repo ./my_project --node "fn:routes.py#compute_total#L15"
-
-# Deterministically index repository:
-harness index --repo ./my_project
+# View past session traversal logs:
+harness logs <session_id>
 ```

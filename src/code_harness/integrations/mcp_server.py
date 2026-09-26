@@ -18,7 +18,7 @@ from code_harness.harness import Harness
 TOOLS = [
     {
         "name": "harness_outline",
-        "description": "Inspect concise codebase outline of all files, functions, classes, and endpoints to locate starting symptoms.",
+        "description": "debug-harness: Inspect concise codebase outline of all files, functions, classes, and endpoints to locate starting symptoms.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -30,6 +30,7 @@ TOOLS = [
     {
         "name": "harness_step",
         "description": (
+            "debug-harness stepper: Deterministic code-graph debugging tool. "
             "Step through code graph 1 node at a time. Returns 'curr' (file, lines, symbol, exact AST code) "
             "and depth-1 upstream/downstream dependents. STRICT RESTRICTION: You may only modify 'curr'. "
             "Pass 'curr_patch' to edit curr, and pass 'modify_next_nodes' with neighbor IDs that need editing next. "
@@ -113,7 +114,7 @@ def run_stdio_mcp() -> None:
                     outline = harness.get_outline()
                     content = json.dumps(outline, indent=2)
 
-                elif tool_name == "harness_step":
+                elif tool_name in ("harness_step", "debug_harness", "debug-harness"):
                     state = harness.step(
                         session_id=args.get("session_id"),
                         issue=args.get("issue"),
