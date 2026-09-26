@@ -1,0 +1,29 @@
+# Specification document
+deterministic-code-graph-harness-spec.md
+
+# Python cache & build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Benchmark outputs
+benchmark_results/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
